@@ -1,0 +1,1 @@
+"""Alegra integration boundary."""
