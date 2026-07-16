@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import uuid
+from contextlib import suppress
 
 from alembic import command
 from alembic.config import Config
@@ -11,6 +12,7 @@ from app.db.session import get_session_factory
 from app.integrations.alegra.client import AlegraClient
 from app.services.invoice_reconciliation import InvoiceReconciliationService
 from app.services.invoice_sync import InvoiceSyncService
+from app.services.webhook_worker import WebhookWorker
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("tenant_id", type=uuid.UUID)
     sync.add_argument("--mode", choices=("initial", "reconcile"), default="initial")
     sync.add_argument("--lookback-days", type=int, default=30)
+
+    worker = subparsers.add_parser("worker", help="Process the durable webhook queue")
+    worker.add_argument("--poll-seconds", type=float, default=5.0)
     return parser
 
 
@@ -68,6 +73,23 @@ async def sync_invoices(*, tenant_id: uuid.UUID, mode: str, lookback_days: int) 
     print(f"{run.id} {run.status} read={run.records_read} created={run.records_written}")
 
 
+async def process_webhooks(*, poll_seconds: float) -> None:
+    settings = get_settings()
+    if settings.alegra_api_basic_token is None:
+        raise RuntimeError("ALEGRA_API_BASIC_TOKEN is required for worker")
+    if poll_seconds <= 0:
+        raise ValueError("poll_seconds must be positive")
+    with get_session_factory()() as session:
+        async with AlegraClient(
+            basic_token=settings.alegra_api_basic_token.get_secret_value()
+        ) as alegra:
+            worker = WebhookWorker(session=session, alegra=alegra)
+            while True:
+                processed = await worker.run_once()
+                if not processed:
+                    await asyncio.sleep(poll_seconds)
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.command == "migrate":
@@ -82,6 +104,9 @@ def main() -> None:
                 lookback_days=args.lookback_days,
             )
         )
+    elif args.command == "worker":
+        with suppress(KeyboardInterrupt):
+            asyncio.run(process_webhooks(poll_seconds=args.poll_seconds))
 
 
 if __name__ == "__main__":

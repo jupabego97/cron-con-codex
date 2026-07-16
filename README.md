@@ -34,6 +34,8 @@ alembic upgrade head
 
 No agregues `ALEGRA_API_BASIC_TOKEN` hasta haber rotado la credencial expuesta en el ETL anterior.
 
+Railway debe ejecutar `python -m app.cli migrate` como comando pre-deploy. El servicio API usa el `PORT` que Railway inyecta; un segundo servicio puede ejecutar `python -m app.cli worker` para procesar webhooks.
+
 ## Documentación
 
 - [Fase 0](docs/architecture/phase-0.md)

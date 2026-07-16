@@ -9,6 +9,7 @@ python -m app.cli migrate
 python -m app.cli create-tenant mi-empresa "Mi Empresa"
 python -m app.cli sync-invoices <tenant-uuid> --mode initial
 python -m app.cli sync-invoices <tenant-uuid> --mode reconcile --lookback-days 30
+python -m app.cli worker
 ```
 
 El comando de sincronización exige `ALEGRA_API_BASIC_TOKEN`. No existe un valor por defecto y no se imprime el token.
@@ -24,3 +25,4 @@ El comando de sincronización exige `ALEGRA_API_BASIC_TOKEN`. No existe un valor
 
 La aplicación no ejecuta una sincronización automáticamente al arrancar. Toda extracción requiere un comando o worker explícito.
 
+El worker usa la cola PostgreSQL de webhooks; Redis queda reservado para una futura optimización de rate limiting compartido.
