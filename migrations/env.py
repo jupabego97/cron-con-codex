@@ -4,7 +4,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 import app.db.models  # noqa: F401  Ensure model metadata is registered.
-from app.core.config import get_settings
+from app.core.config import get_settings, normalize_database_url
 from app.db.base import Base
 
 config = context.config
@@ -18,7 +18,7 @@ def get_url() -> str:
     database_url = get_settings().database_url
     if not database_url:
         raise RuntimeError("DATABASE_URL is required to run Alembic migrations")
-    return database_url
+    return normalize_database_url(database_url)
 
 
 def run_migrations_offline() -> None:

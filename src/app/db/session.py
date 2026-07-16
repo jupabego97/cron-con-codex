@@ -4,7 +4,7 @@ from functools import lru_cache
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import get_settings
+from app.core.config import get_settings, normalize_database_url
 
 
 @lru_cache
@@ -12,7 +12,7 @@ def get_engine():
     settings = get_settings()
     if not settings.database_url:
         raise RuntimeError("DATABASE_URL is required for database operations")
-    return create_engine(settings.database_url, pool_pre_ping=True)
+    return create_engine(normalize_database_url(settings.database_url), pool_pre_ping=True)
 
 
 @lru_cache

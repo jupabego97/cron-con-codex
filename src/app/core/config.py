@@ -31,6 +31,14 @@ class Settings(BaseSettings):
         return self
 
 
+def normalize_database_url(database_url: str) -> str:
+    """Select the psycopg v3 SQLAlchemy dialect for Railway/Postgres URLs."""
+    for prefix in ("postgres://", "postgresql://", "postgresql+psycopg2://"):
+        if database_url.startswith(prefix):
+            return "postgresql+psycopg://" + database_url[len(prefix) :]
+    return database_url
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
