@@ -1,11 +1,12 @@
 import uuid
-from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.db.models import InboundEvent
+from app.domain.entity_repository import mark_alegra_entity_deleted, upsert_alegra_entity
 from app.domain.invoice_repository import mark_invoice_deleted, upsert_invoice
 from app.integrations.alegra.client import AlegraClient
+from app.integrations.alegra.resources import RESOURCE_BY_KEY
 from app.services.event_queue import claim_next_event, complete_event, retry_or_fail_event
 
 
@@ -32,17 +33,27 @@ class WebhookWorker:
         return True
 
     async def _process(self, event: InboundEvent) -> None:
-        if event.entity_type != "invoice" or not event.external_id:
-            raise ValueError("Inbound event cannot be mapped to an invoice")
+        if not event.external_id:
+            raise ValueError("Inbound event does not contain an Alegra resource id")
         tenant_id = uuid.UUID(str(event.tenant_id))
-        if event.subject == "delete-invoice":
-            mark_invoice_deleted(self._session, tenant_id=tenant_id, alegra_id=event.external_id)
+        resource = RESOURCE_BY_KEY.get(event.entity_type)
+        if resource is None:
+            raise ValueError(f"Inbound event has unsupported resource {event.entity_type!r}")
+        if event.subject.startswith("delete-"):
+            mark_alegra_entity_deleted(
+                self._session,
+                tenant_id=tenant_id,
+                resource=resource.key,
+                external_id=event.external_id,
+            )
+            if resource.key == "invoice":
+                mark_invoice_deleted(
+                    self._session, tenant_id=tenant_id, alegra_id=event.external_id
+                )
             return
-        payload = await self._alegra.get_invoice(event.external_id)
-        upsert_invoice(self._session, tenant_id=tenant_id, payload=_invoice_payload(payload))
-
-
-def _invoice_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Support either an invoice object or an API wrapper while preserving the source payload."""
-    invoice = payload.get("invoice")
-    return invoice if isinstance(invoice, dict) else payload
+        payload = await self._alegra.get_resource(resource, event.external_id)
+        upsert_alegra_entity(
+            self._session, tenant_id=tenant_id, resource=resource.key, payload=payload
+        )
+        if resource.key == "invoice":
+            upsert_invoice(self._session, tenant_id=tenant_id, payload=payload)

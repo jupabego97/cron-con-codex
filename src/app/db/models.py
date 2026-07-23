@@ -72,6 +72,60 @@ class RawAlegraDocument(Base):
     )
 
 
+class AlegraEntity(Base):
+    """Latest canonical payload for every resource supported by the extractor.
+
+    Immutable versions remain in ``raw_alegra_documents``; this table is the
+    convenient current-state projection for resources not yet given a dedicated
+    analytical model.
+    """
+
+    __tablename__ = "alegra_entities"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "resource", "external_id", name="uq_alegra_entity_tenant_resource_id"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    sync_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sync_runs.id"), index=True)
+    resource: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ResourceSyncState(Base):
+    """Operational state used to audit each tenant/resource extraction."""
+
+    __tablename__ = "resource_sync_states"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "resource", name="uq_resource_sync_state_tenant_resource"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    resource: Mapped[str] = mapped_column(String(50), nullable=False)
+    last_full_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SalesInvoice(Base):
     __tablename__ = "sales_invoices"
     __table_args__ = (

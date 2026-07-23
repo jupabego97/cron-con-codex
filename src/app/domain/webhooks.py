@@ -17,23 +17,38 @@ class ParsedWebhookEvent:
     payload_hash: str
 
 
-_INVOICE_SUBJECTS = {"new-invoice", "edit-invoice", "delete-invoice"}
+_EVENT_TARGETS: dict[str, tuple[str, str]] = {
+    "new-invoice": ("invoice", "invoice"),
+    "edit-invoice": ("invoice", "invoice"),
+    "delete-invoice": ("invoice", "invoice"),
+    "new-bill": ("bill", "bill"),
+    "edit-bill": ("bill", "bill"),
+    "delete-bill": ("bill", "bill"),
+    "new-client": ("contact", "client"),
+    "edit-client": ("contact", "client"),
+    "delete-client": ("contact", "client"),
+    "new-item": ("item", "item"),
+    "edit-item": ("item", "item"),
+    "delete-item": ("item", "item"),
+}
 
 
 def parse_alegra_webhook(payload: dict[str, Any]) -> ParsedWebhookEvent:
     """Extract a queueable event without trusting the webhook as the final source of truth."""
     subject = payload.get("subject")
-    if subject not in _INVOICE_SUBJECTS:
+    target = _EVENT_TARGETS.get(subject) if isinstance(subject, str) else None
+    if target is None:
         raise UnsupportedWebhookEvent(f"Unsupported Alegra webhook subject: {subject!r}")
 
     message = payload.get("message")
-    invoice = message.get("invoice") if isinstance(message, dict) else None
+    entity_type, message_key = target
+    entity = message.get(message_key) if isinstance(message, dict) else None
     external_id = (
-        str(invoice["id"]) if isinstance(invoice, dict) and invoice.get("id") is not None else None
+        str(entity["id"]) if isinstance(entity, dict) and entity.get("id") is not None else None
     )
     return ParsedWebhookEvent(
         subject=subject,
-        entity_type="invoice",
+        entity_type=entity_type,
         external_id=external_id,
         payload=payload,
         payload_hash=canonical_payload_hash(payload),

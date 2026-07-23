@@ -36,6 +36,20 @@ No agregues `ALEGRA_API_BASIC_TOKEN` hasta haber rotado la credencial expuesta e
 
 Railway debe ejecutar `python -m app.cli migrate` como comando pre-deploy. El servicio API usa el `PORT` que Railway inyecta; un segundo servicio puede ejecutar `python -m app.cli worker` para procesar webhooks.
 
+## Backfill historico local
+
+Tras crear el tenant y configurar `DATABASE_URL` y `ALEGRA_API_BASIC_TOKEN`:
+
+```powershell
+python -m app.cli backfill-all <tenant-uuid> --resources contact,item,warehouse,seller
+python -m app.cli backfill-all <tenant-uuid> --requests-per-minute 110
+```
+
+El segundo comando descarga el historial de contactos, productos, bodegas,
+vendedores, facturas de venta y compra, pagos, notas credito, ajustes y
+transferencias de inventario. La guia completa esta en
+`docs/architecture/phase-3-historical-backfill.md`.
+
 ## Documentación
 
 - [Fase 0](docs/architecture/phase-0.md)

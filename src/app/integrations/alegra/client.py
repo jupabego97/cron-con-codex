@@ -1,11 +1,13 @@
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+
+from app.integrations.alegra.resources import AlegraResource
 
 
 class AlegraClientError(RuntimeError):
@@ -26,6 +28,12 @@ class AlegraRetryableError(AlegraClientError):
 
 @dataclass(frozen=True)
 class InvoicePage:
+    data: list[dict[str, Any]]
+    total: int | None
+
+
+@dataclass(frozen=True)
+class ResourcePage:
     data: list[dict[str, Any]]
     total: int | None
 
@@ -118,6 +126,96 @@ class AlegraClient:
             raise AlegraPermanentError("Alegra returned an unexpected invoice response")
         return payload
 
+    async def list_resource_page(
+        self,
+        resource: AlegraResource,
+        *,
+        start: int,
+        limit: int = 30,
+        metadata: bool = False,
+    ) -> ResourcePage:
+        """Read a page from any catalogued, offset-paginated Alegra resource."""
+        if start < 0:
+            raise ValueError("start must be greater than or equal to zero")
+        if not 1 <= limit <= 30:
+            raise ValueError("Alegra page limit must be between 1 and 30")
+        params: dict[str, str | int] = {"start": start, "limit": limit}
+        if resource.supports_metadata:
+            params["metadata"] = str(metadata).lower()
+        if resource.order_field is not None:
+            params["order_field"] = resource.order_field
+            params["order_direction"] = "ASC"
+        payload = await self._get_json(resource.collection_path, params=params)
+        return _parse_resource_page(payload)
+
+    async def get_resource(self, resource: AlegraResource, external_id: str) -> dict[str, Any]:
+        """Fetch the canonical resource detail and unwrap known API response envelopes."""
+        payload = await self._get_json(
+            f"{resource.collection_path}/{quote(external_id, safe='')}", params={}
+        )
+        if not isinstance(payload, dict):
+            raise AlegraPermanentError(
+                f"Alegra returned an unexpected {resource.key} detail response"
+            )
+        for key in resource.response_keys:
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                return nested
+        return payload
+
+    async def iter_all_resource(
+        self,
+        resource: AlegraResource,
+        *,
+        page_concurrency: int = 4,
+        hydrate_details: bool = True,
+        detail_concurrency: int = 6,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream a complete resource history with bounded concurrent page/detail reads.
+
+        All requests use this client's single rate limiter, so multiple resource
+        tasks cannot exceed the configured per-credential request budget.
+        """
+        if page_concurrency < 1 or detail_concurrency < 1:
+            raise ValueError("concurrency values must be positive")
+        first_page = await self.list_resource_page(resource, start=0, metadata=True)
+        async for record in self._hydrate_records(
+            resource,
+            first_page.data,
+            hydrate_details=hydrate_details,
+            detail_concurrency=detail_concurrency,
+        ):
+            yield record
+
+        if first_page.total is None:
+            start = len(first_page.data)
+            page = first_page
+            while page.data:
+                page = await self.list_resource_page(resource, start=start)
+                async for record in self._hydrate_records(
+                    resource,
+                    page.data,
+                    hydrate_details=hydrate_details,
+                    detail_concurrency=detail_concurrency,
+                ):
+                    yield record
+                start += len(page.data)
+            return
+
+        offsets = range(30, first_page.total, 30)
+        for offset_batch in _batches(offsets, page_concurrency):
+            pages = await asyncio.gather(
+                *(self.list_resource_page(resource, start=offset) for offset in offset_batch)
+            )
+            for page in pages:
+                async for record in self._hydrate_records(
+                    resource,
+                    page.data,
+                    hydrate_details=hydrate_details,
+                    detail_concurrency=detail_concurrency,
+                ):
+                    yield record
+
     async def _iter_invoice_pages(
         self, *, filters: dict[str, str] | None = None
     ) -> AsyncIterator[dict[str, Any]]:
@@ -140,6 +238,33 @@ class AlegraClient:
             page = await self.list_invoice_page(start=start, filters=filters)
             for invoice in page.data:
                 yield invoice
+
+    async def _hydrate_records(
+        self,
+        resource: AlegraResource,
+        records: list[dict[str, Any]],
+        *,
+        hydrate_details: bool,
+        detail_concurrency: int,
+    ) -> AsyncIterator[dict[str, Any]]:
+        if not hydrate_details or not resource.supports_detail:
+            for record in records:
+                yield record
+            return
+        for record_batch in _batches(records, detail_concurrency):
+            hydrated = await asyncio.gather(
+                *(self._hydrate_one(resource, record) for record in record_batch)
+            )
+            for record in hydrated:
+                yield record
+
+    async def _hydrate_one(
+        self, resource: AlegraResource, listing_payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        external_id = listing_payload.get("id")
+        if external_id is None:
+            raise AlegraPermanentError(f"Alegra {resource.key} listing returned a row without id")
+        return await self.get_resource(resource, str(external_id))
 
     async def _get_json(self, path: str, *, params: dict[str, str | int]) -> Any:
         for attempt in range(1, self._max_retries + 1):
@@ -190,3 +315,28 @@ def _rate_limit_delay(response: httpx.Response) -> float:
         return max(float(response.headers.get("X-Rate-Limit-Reset", "60")), 1.0)
     except ValueError:
         return 60.0
+
+
+def _parse_resource_page(payload: Any) -> ResourcePage:
+    if isinstance(payload, list):
+        return ResourcePage(data=[row for row in payload if isinstance(row, dict)], total=None)
+    if not isinstance(payload, dict):
+        raise AlegraPermanentError("Alegra returned an unexpected collection response")
+    data = payload.get("data", [])
+    metadata = payload.get("metadata", {})
+    total = metadata.get("total") if isinstance(metadata, dict) else None
+    return ResourcePage(
+        data=[row for row in data if isinstance(row, dict)] if isinstance(data, list) else [],
+        total=int(total) if total is not None else None,
+    )
+
+
+def _batches(values: Iterable[Any], size: int) -> Iterable[list[Any]]:
+    batch: list[Any] = []
+    for value in values:
+        batch.append(value)
+        if len(batch) == size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch

@@ -16,6 +16,13 @@ def test_invoice_webhook_is_queueable_and_identifies_document() -> None:
     assert len(event.payload_hash) == 64
 
 
-def test_non_invoice_webhook_is_ignored_by_the_invoice_scope() -> None:
+def test_supported_item_webhook_is_queueable() -> None:
+    event = parse_alegra_webhook({"subject": "new-item", "message": {"item": {"id": "ITEM-1"}}})
+
+    assert event.entity_type == "item"
+    assert event.external_id == "ITEM-1"
+
+
+def test_unknown_webhook_is_rejected() -> None:
     with pytest.raises(UnsupportedWebhookEvent):
-        parse_alegra_webhook({"subject": "new-item", "message": {"item": {"id": "ITEM-1"}}})
+        parse_alegra_webhook({"subject": "new-payment", "message": {"payment": {"id": "PAY-1"}}})

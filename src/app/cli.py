@@ -10,8 +10,10 @@ from app.core.config import get_settings
 from app.db.models import Tenant
 from app.db.session import get_session_factory
 from app.integrations.alegra.client import AlegraClient
+from app.integrations.alegra.resources import resolve_resources
 from app.services.invoice_reconciliation import InvoiceReconciliationService
 from app.services.invoice_sync import InvoiceSyncService
+from app.services.resource_sync import HistoricalBackfillService
 from app.services.webhook_worker import WebhookWorker
 
 
@@ -34,6 +36,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     worker = subparsers.add_parser("worker", help="Process the durable webhook queue")
     worker.add_argument("--poll-seconds", type=float, default=5.0)
+
+    backfill = subparsers.add_parser(
+        "backfill-all", help="Extract complete history for all supported business resources"
+    )
+    backfill.add_argument("tenant_id", type=uuid.UUID)
+    backfill.add_argument(
+        "--resources",
+        default="all",
+        help=(
+            "all or comma-separated keys: contact,item,warehouse,seller,invoice,bill,payment,"
+            "credit_note,inventory_adjustment,warehouse_transfer"
+        ),
+    )
+    backfill.add_argument("--resource-concurrency", type=int, default=2)
+    backfill.add_argument("--page-concurrency", type=int, default=4)
+    backfill.add_argument("--detail-concurrency", type=int, default=6)
+    backfill.add_argument(
+        "--requests-per-minute",
+        type=int,
+        default=110,
+        help="shared API budget, capped by Alegra at 150 requests per minute",
+    )
+    backfill.add_argument(
+        "--skip-details",
+        action="store_true",
+        help="store listing responses only; use only for a faster non-canonical bootstrap",
+    )
     return parser
 
 
@@ -90,6 +119,45 @@ async def process_webhooks(*, poll_seconds: float) -> None:
                     await asyncio.sleep(poll_seconds)
 
 
+async def backfill_all(
+    *,
+    tenant_id: uuid.UUID,
+    resources: str,
+    resource_concurrency: int,
+    page_concurrency: int,
+    detail_concurrency: int,
+    requests_per_minute: int,
+    skip_details: bool,
+) -> bool:
+    settings = get_settings()
+    if settings.alegra_api_basic_token is None:
+        raise RuntimeError("ALEGRA_API_BASIC_TOKEN is required for backfill-all")
+    selected_resources = resolve_resources(resources)
+    async with AlegraClient(
+        basic_token=settings.alegra_api_basic_token.get_secret_value(),
+        requests_per_minute=requests_per_minute,
+    ) as alegra:
+        results = await HistoricalBackfillService(
+            session_factory=get_session_factory(), alegra=alegra
+        ).run(
+            tenant_id=tenant_id,
+            resources=selected_resources,
+            resource_concurrency=resource_concurrency,
+            page_concurrency=page_concurrency,
+            detail_concurrency=detail_concurrency,
+            hydrate_details=not skip_details,
+        )
+    for result in results:
+        message = (
+            f"{result.resource} {result.status} run={result.run_id} "
+            f"read={result.records_read} written={result.records_written}"
+        )
+        if result.error_message:
+            message += f" error={result.error_message}"
+        print(message)
+    return all(result.status == "succeeded" for result in results)
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.command == "migrate":
@@ -107,6 +175,20 @@ def main() -> None:
     elif args.command == "worker":
         with suppress(KeyboardInterrupt):
             asyncio.run(process_webhooks(poll_seconds=args.poll_seconds))
+    elif args.command == "backfill-all":
+        succeeded = asyncio.run(
+            backfill_all(
+                tenant_id=args.tenant_id,
+                resources=args.resources,
+                resource_concurrency=args.resource_concurrency,
+                page_concurrency=args.page_concurrency,
+                detail_concurrency=args.detail_concurrency,
+                requests_per_minute=args.requests_per_minute,
+                skip_details=args.skip_details,
+            )
+        )
+        if not succeeded:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
