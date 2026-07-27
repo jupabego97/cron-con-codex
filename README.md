@@ -42,7 +42,7 @@ Tras crear el tenant y configurar `DATABASE_URL` y `ALEGRA_API_BASIC_TOKEN`:
 
 ```powershell
 python -m app.cli backfill-all <tenant-uuid> --resources contact,item,warehouse,seller
-python -m app.cli backfill-all <tenant-uuid> --requests-per-minute 110
+python -m app.cli backfill-all <tenant-uuid> --resources all --requests-per-minute 130
 ```
 
 El segundo comando descarga el historial de contactos, productos, bodegas,

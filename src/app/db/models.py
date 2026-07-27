@@ -181,6 +181,200 @@ class SalesInvoiceLine(Base):
     invoice: Mapped[SalesInvoice] = relationship(back_populates="lines")
 
 
+class SourceProjectionMixin:
+    """Common source-audited shape for typed operational projections.
+
+    ``payload`` deliberately remains available because Alegra fields vary by country
+    and account configuration. The typed columns are the stable analytical contract.
+    """
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    alegra_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class Contact(SourceProjectionMixin, Base):
+    __tablename__ = "contacts"
+    __table_args__ = (UniqueConstraint("tenant_id", "alegra_id", name="uq_contact_tenant_alegra"),)
+
+    name: Mapped[str] = mapped_column(String(300), nullable=False)
+    identification: Mapped[str | None] = mapped_column(String(100))
+    email: Mapped[str | None] = mapped_column(String(300))
+    phone_primary: Mapped[str | None] = mapped_column(String(100))
+    mobile: Mapped[str | None] = mapped_column(String(100))
+    contact_type: Mapped[str | None] = mapped_column(String(50))
+    status: Mapped[str | None] = mapped_column(String(30))
+    seller_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    credit_limit: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+
+
+class CatalogItem(SourceProjectionMixin, Base):
+    __tablename__ = "catalog_items"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "alegra_id", name="uq_catalog_item_tenant_alegra"),
+    )
+
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    reference: Mapped[str | None] = mapped_column(String(200))
+    item_type: Mapped[str | None] = mapped_column(String(50))
+    status: Mapped[str | None] = mapped_column(String(30))
+    inventory_enabled: Mapped[bool | None] = mapped_column(Boolean)
+    unit: Mapped[str | None] = mapped_column(String(100))
+    base_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+
+
+class Warehouse(SourceProjectionMixin, Base):
+    __tablename__ = "warehouses"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "alegra_id", name="uq_warehouse_tenant_alegra"),
+    )
+
+    name: Mapped[str] = mapped_column(String(300), nullable=False)
+    status: Mapped[str | None] = mapped_column(String(30))
+    description: Mapped[str | None] = mapped_column(Text)
+
+
+class Seller(SourceProjectionMixin, Base):
+    __tablename__ = "sellers"
+    __table_args__ = (UniqueConstraint("tenant_id", "alegra_id", name="uq_seller_tenant_alegra"),)
+
+    name: Mapped[str] = mapped_column(String(300), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(300))
+    status: Mapped[str | None] = mapped_column(String(30))
+
+
+class PurchaseBill(SourceProjectionMixin, Base):
+    __tablename__ = "purchase_bills"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "alegra_id", name="uq_purchase_bill_tenant_alegra"),
+    )
+
+    issue_date: Mapped[date | None] = mapped_column(Date)
+    due_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str | None] = mapped_column(String(30))
+    document_number: Mapped[str | None] = mapped_column(String(100))
+    provider_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    provider_name: Mapped[str | None] = mapped_column(String(300))
+    currency_code: Mapped[str | None] = mapped_column(String(10))
+    total: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    total_paid: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    balance: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+
+
+class Payment(SourceProjectionMixin, Base):
+    __tablename__ = "payments"
+    __table_args__ = (UniqueConstraint("tenant_id", "alegra_id", name="uq_payment_tenant_alegra"),)
+
+    payment_date: Mapped[date | None] = mapped_column(Date)
+    payment_type: Mapped[str | None] = mapped_column(String(30))
+    document_number: Mapped[str | None] = mapped_column(String(100))
+    contact_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    currency_code: Mapped[str | None] = mapped_column(String(10))
+
+
+class CreditNote(SourceProjectionMixin, Base):
+    __tablename__ = "credit_notes"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "alegra_id", name="uq_credit_note_tenant_alegra"),
+    )
+
+    issue_date: Mapped[date | None] = mapped_column(Date)
+    due_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str | None] = mapped_column(String(30))
+    document_number: Mapped[str | None] = mapped_column(String(100))
+    client_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    warehouse_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    currency_code: Mapped[str | None] = mapped_column(String(10))
+    total: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+
+
+class InventoryAdjustment(SourceProjectionMixin, Base):
+    __tablename__ = "inventory_adjustments"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "alegra_id", name="uq_inventory_adjustment_tenant_alegra"),
+    )
+
+    adjustment_date: Mapped[date | None] = mapped_column(Date)
+    document_number: Mapped[str | None] = mapped_column(String(100))
+    warehouse_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    observations: Mapped[str | None] = mapped_column(Text)
+
+
+class WarehouseTransfer(SourceProjectionMixin, Base):
+    __tablename__ = "warehouse_transfers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "alegra_id", name="uq_warehouse_transfer_tenant_alegra"),
+    )
+
+    transfer_date: Mapped[date | None] = mapped_column(Date)
+    document_number: Mapped[str | None] = mapped_column(String(100))
+    source_warehouse_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    destination_warehouse_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    observations: Mapped[str | None] = mapped_column(Text)
+
+
+class DocumentLineMixin:
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    document_alegra_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    line_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    item_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    item_name: Mapped[str | None] = mapped_column(String(500))
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    line_total: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+
+class PurchaseBillLine(DocumentLineMixin, Base):
+    __tablename__ = "purchase_bill_lines"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "document_alegra_id", "line_number", name="uq_purchase_bill_line"
+        ),
+    )
+
+
+class CreditNoteLine(DocumentLineMixin, Base):
+    __tablename__ = "credit_note_lines"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "document_alegra_id", "line_number", name="uq_credit_note_line"
+        ),
+    )
+
+
+class InventoryAdjustmentLine(DocumentLineMixin, Base):
+    __tablename__ = "inventory_adjustment_lines"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "document_alegra_id", "line_number", name="uq_inventory_adjustment_line"
+        ),
+    )
+
+
+class WarehouseTransferLine(DocumentLineMixin, Base):
+    __tablename__ = "warehouse_transfer_lines"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "document_alegra_id", "line_number", name="uq_warehouse_transfer_line"
+        ),
+    )
+
+
 class InboundEvent(Base):
     __tablename__ = "inbound_events"
     __table_args__ = (

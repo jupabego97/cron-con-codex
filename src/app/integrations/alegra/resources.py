@@ -16,24 +16,36 @@ class AlegraResource:
     order_field: str | None = "id"
     supports_metadata: bool = True
     supports_detail: bool = True
+    hydrate_details_by_default: bool = False
+    list_params: tuple[tuple[str, str], ...] = ()
 
 
 BUSINESS_RESOURCES: tuple[AlegraResource, ...] = (
-    AlegraResource("contact", "/contacts", ("contact",)),
-    AlegraResource("item", "/items", ("item",)),
+    AlegraResource("contact", "/contacts", ("contact",), list_params=(("mode", "advanced"),)),
+    AlegraResource("item", "/items", ("item",), list_params=(("mode", "advanced"),)),
     AlegraResource("warehouse", "/warehouses", ("warehouse",)),
     AlegraResource(
-        "seller", "/sellers", ("seller",), order_field=None, supports_metadata=False,
-        supports_detail=False
+        "seller",
+        "/sellers",
+        ("seller",),
+        order_field=None,
+        supports_metadata=False,
+        supports_detail=False,
     ),
-    AlegraResource("invoice", "/invoices", ("invoice",)),
-    AlegraResource("bill", "/bills", ("bill",)),
+    AlegraResource("invoice", "/invoices", ("invoice",), hydrate_details_by_default=True),
+    AlegraResource("bill", "/bills", ("bill",), hydrate_details_by_default=True),
     AlegraResource("payment", "/payments", ("payment",)),
-    AlegraResource("credit_note", "/credit-notes", ("creditNote", "credit_note")),
+    AlegraResource(
+        "credit_note",
+        "/credit-notes",
+        ("creditNote", "credit_note"),
+        hydrate_details_by_default=True,
+    ),
     AlegraResource(
         "inventory_adjustment",
         "/inventory-adjustments",
         ("inventoryAdjustment", "inventory_adjustment"),
+        hydrate_details_by_default=True,
     ),
     AlegraResource(
         "warehouse_transfer",
@@ -41,6 +53,7 @@ BUSINESS_RESOURCES: tuple[AlegraResource, ...] = (
         ("warehouseTransfer", "warehouse_transfer"),
         order_field=None,
         supports_metadata=False,
+        hydrate_details_by_default=True,
     ),
 )
 

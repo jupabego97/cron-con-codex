@@ -10,8 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import ResourceSyncState, SyncRun
-from app.domain.entity_repository import upsert_alegra_entity
-from app.domain.invoice_repository import upsert_invoice
+from app.domain.batch_repository import persist_resource_batch
 from app.integrations.alegra.client import AlegraClient
 from app.integrations.alegra.resources import AlegraResource
 
@@ -24,6 +23,13 @@ class BackfillResult:
     records_read: int
     records_written: int
     error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class BackfillProgress:
+    resource: str
+    records_read: int
+    records_written: int
 
 
 class ResourceSyncService:
@@ -41,13 +47,18 @@ class ResourceSyncService:
         page_concurrency: int,
         detail_concurrency: int,
         hydrate_details: bool,
+        write_batch_size: int,
+        progress_callback: Callable[[BackfillProgress], None] | None = None,
     ) -> BackfillResult:
+        if write_batch_size < 1:
+            raise ValueError("write_batch_size must be positive")
         sync_run = SyncRun(
             tenant_id=tenant_id, resource=resource.key, mode="initial", status="running"
         )
         self._session.add(sync_run)
         self._session.commit()
         try:
+            write_buffer: list[dict] = []
             async for payload in self._alegra.iter_all_resource(
                 resource,
                 page_concurrency=page_concurrency,
@@ -55,32 +66,69 @@ class ResourceSyncService:
                 hydrate_details=hydrate_details,
             ):
                 sync_run.records_read += 1
-                _, created = upsert_alegra_entity(
-                    self._session,
-                    tenant_id=tenant_id,
-                    resource=resource.key,
-                    payload=payload,
-                    sync_run_id=sync_run.id,
-                )
-                if resource.key == "invoice":
-                    upsert_invoice(
-                        self._session,
+                write_buffer.append(payload)
+                if len(write_buffer) >= write_batch_size:
+                    self._write_batch(
+                        sync_run=sync_run,
                         tenant_id=tenant_id,
-                        payload=payload,
-                        sync_run_id=sync_run.id,
+                        resource=resource,
+                        payloads=write_buffer,
+                        progress_callback=progress_callback,
                     )
-                sync_run.records_written += int(created)
-                if sync_run.records_read % 25 == 0:
-                    self._session.commit()
+                    write_buffer = []
+
+            if write_buffer:
+                self._write_batch(
+                    sync_run=sync_run,
+                    tenant_id=tenant_id,
+                    resource=resource,
+                    payloads=write_buffer,
+                    progress_callback=progress_callback,
+                )
 
             self._finish_success(sync_run, tenant_id=tenant_id, resource=resource.key)
             self._session.commit()
             return _result(sync_run)
         except Exception as error:
             self._session.rollback()
-            self._finish_failure(sync_run, tenant_id=tenant_id, resource=resource.key, error=error)
+            failed_run = self._session.get(SyncRun, sync_run.id)
+            if failed_run is None:
+                raise RuntimeError("Sync run disappeared after a failed batch") from error
+            self._finish_failure(
+                failed_run,
+                tenant_id=tenant_id,
+                resource=resource.key,
+                error=error,
+            )
             self._session.commit()
-            return _result(sync_run)
+            return _result(failed_run)
+
+    def _write_batch(
+        self,
+        *,
+        sync_run: SyncRun,
+        tenant_id: uuid.UUID,
+        resource: AlegraResource,
+        payloads: list[dict],
+        progress_callback: Callable[[BackfillProgress], None] | None,
+    ) -> None:
+        result = persist_resource_batch(
+            self._session,
+            tenant_id=tenant_id,
+            resource=resource.key,
+            payloads=payloads,
+            sync_run_id=sync_run.id,
+        )
+        sync_run.records_written += result.records_written
+        self._session.commit()
+        if progress_callback is not None:
+            progress_callback(
+                BackfillProgress(
+                    resource=resource.key,
+                    records_read=sync_run.records_read,
+                    records_written=sync_run.records_written,
+                )
+            )
 
     def _finish_success(self, sync_run: SyncRun, *, tenant_id: uuid.UUID, resource: str) -> None:
         now = datetime.now(UTC)
@@ -125,10 +173,12 @@ class HistoricalBackfillService:
         *,
         tenant_id: uuid.UUID,
         resources: Sequence[AlegraResource],
-        resource_concurrency: int = 2,
-        page_concurrency: int = 4,
-        detail_concurrency: int = 6,
+        resource_concurrency: int = 4,
+        page_concurrency: int = 6,
+        detail_concurrency: int = 8,
         hydrate_details: bool = True,
+        write_batch_size: int = 200,
+        progress_callback: Callable[[BackfillProgress], None] | None = None,
     ) -> list[BackfillResult]:
         if resource_concurrency < 1:
             raise ValueError("resource_concurrency must be positive")
@@ -143,7 +193,9 @@ class HistoricalBackfillService:
                         resource=resource,
                         page_concurrency=page_concurrency,
                         detail_concurrency=detail_concurrency,
-                        hydrate_details=hydrate_details,
+                        hydrate_details=hydrate_details and resource.hydrate_details_by_default,
+                        write_batch_size=write_batch_size,
+                        progress_callback=progress_callback,
                     )
 
         return list(await asyncio.gather(*(run_resource(resource) for resource in resources)))

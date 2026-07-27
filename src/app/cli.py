@@ -13,7 +13,7 @@ from app.integrations.alegra.client import AlegraClient
 from app.integrations.alegra.resources import resolve_resources
 from app.services.invoice_reconciliation import InvoiceReconciliationService
 from app.services.invoice_sync import InvoiceSyncService
-from app.services.resource_sync import HistoricalBackfillService
+from app.services.resource_sync import BackfillProgress, HistoricalBackfillService
 from app.services.webhook_worker import WebhookWorker
 
 
@@ -49,13 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
             "credit_note,inventory_adjustment,warehouse_transfer"
         ),
     )
-    backfill.add_argument("--resource-concurrency", type=int, default=2)
-    backfill.add_argument("--page-concurrency", type=int, default=4)
-    backfill.add_argument("--detail-concurrency", type=int, default=6)
+    backfill.add_argument("--resource-concurrency", type=int, default=4)
+    backfill.add_argument("--page-concurrency", type=int, default=6)
+    backfill.add_argument("--detail-concurrency", type=int, default=8)
+    backfill.add_argument("--write-batch-size", type=int, default=200)
     backfill.add_argument(
         "--requests-per-minute",
         type=int,
-        default=110,
+        default=130,
         help="shared API budget, capped by Alegra at 150 requests per minute",
     )
     backfill.add_argument(
@@ -126,6 +127,7 @@ async def backfill_all(
     resource_concurrency: int,
     page_concurrency: int,
     detail_concurrency: int,
+    write_batch_size: int,
     requests_per_minute: int,
     skip_details: bool,
 ) -> bool:
@@ -133,6 +135,14 @@ async def backfill_all(
     if settings.alegra_api_basic_token is None:
         raise RuntimeError("ALEGRA_API_BASIC_TOKEN is required for backfill-all")
     selected_resources = resolve_resources(resources)
+
+    def report_progress(progress: BackfillProgress) -> None:
+        print(
+            f"{progress.resource} progress read={progress.records_read} "
+            f"written={progress.records_written}",
+            flush=True,
+        )
+
     async with AlegraClient(
         basic_token=settings.alegra_api_basic_token.get_secret_value(),
         requests_per_minute=requests_per_minute,
@@ -146,6 +156,8 @@ async def backfill_all(
             page_concurrency=page_concurrency,
             detail_concurrency=detail_concurrency,
             hydrate_details=not skip_details,
+            write_batch_size=write_batch_size,
+            progress_callback=report_progress,
         )
     for result in results:
         message = (
@@ -183,6 +195,7 @@ def main() -> None:
                 resource_concurrency=args.resource_concurrency,
                 page_concurrency=args.page_concurrency,
                 detail_concurrency=args.detail_concurrency,
+                write_batch_size=args.write_batch_size,
                 requests_per_minute=args.requests_per_minute,
                 skip_details=args.skip_details,
             )

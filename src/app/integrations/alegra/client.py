@@ -140,6 +140,7 @@ class AlegraClient:
         if not 1 <= limit <= 30:
             raise ValueError("Alegra page limit must be between 1 and 30")
         params: dict[str, str | int] = {"start": start, "limit": limit}
+        params.update(dict(resource.list_params))
         if resource.supports_metadata:
             params["metadata"] = str(metadata).lower()
         if resource.order_field is not None:
@@ -168,7 +169,7 @@ class AlegraClient:
         resource: AlegraResource,
         *,
         page_concurrency: int = 4,
-        hydrate_details: bool = True,
+        hydrate_details: bool | None = None,
         detail_concurrency: int = 6,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream a complete resource history with bounded concurrent page/detail reads.
@@ -178,6 +179,8 @@ class AlegraClient:
         """
         if page_concurrency < 1 or detail_concurrency < 1:
             raise ValueError("concurrency values must be positive")
+        if hydrate_details is None:
+            hydrate_details = resource.hydrate_details_by_default
         first_page = await self.list_resource_page(resource, start=0, metadata=True)
         async for record in self._hydrate_records(
             resource,

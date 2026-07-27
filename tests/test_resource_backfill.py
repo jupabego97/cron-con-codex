@@ -12,9 +12,7 @@ def test_resource_backfill_hydrates_details_after_offset_pagination() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(str(request.url))
         if request.url.path.endswith("/contacts") and request.url.params["start"] == "0":
-            return httpx.Response(
-                200, json={"metadata": {"total": 31}, "data": [{"id": "C-1"}]}
-            )
+            return httpx.Response(200, json={"metadata": {"total": 31}, "data": [{"id": "C-1"}]})
         if request.url.path.endswith("/contacts") and request.url.params["start"] == "30":
             return httpx.Response(200, json=[{"id": "C-2"}])
         if request.url.path.endswith("/contacts/C-1"):
@@ -32,7 +30,10 @@ def test_resource_backfill_hydrates_details_after_offset_pagination() -> None:
             return [
                 record
                 async for record in alegra.iter_all_resource(
-                    RESOURCE_BY_KEY["contact"], page_concurrency=2, detail_concurrency=2
+                    RESOURCE_BY_KEY["contact"],
+                    page_concurrency=2,
+                    detail_concurrency=2,
+                    hydrate_details=True,
                 )
             ]
 
@@ -46,3 +47,23 @@ def test_resource_backfill_hydrates_details_after_offset_pagination() -> None:
 def test_resource_selection_is_explicit_and_rejects_unknown_values() -> None:
     assert [resource.key for resource in resolve_resources("contact,item")] == ["contact", "item"]
     assert len(resolve_resources("all")) == len(RESOURCE_BY_KEY)
+
+
+def test_master_resources_use_advanced_listing_without_per_record_details() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"metadata": {"total": 1}, "data": [{"id": "C-1"}]})
+
+    async def collect() -> list[dict[str, str]]:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            base_url="https://api.alegra.com/api/v1", transport=transport
+        ) as http:
+            alegra = AlegraClient(basic_token="test-token", client=http, requests_per_minute=150)
+            return [record async for record in alegra.iter_all_resource(RESOURCE_BY_KEY["contact"])]
+
+    assert asyncio.run(collect()) == [{"id": "C-1"}]
+    assert len(requests) == 1
+    assert requests[0].url.params["mode"] == "advanced"
