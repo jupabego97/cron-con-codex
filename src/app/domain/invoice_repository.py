@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.db.models import RawAlegraDocument, SalesInvoice, SalesInvoiceLine
@@ -52,7 +52,17 @@ def upsert_invoice(
         session.add(invoice)
 
     _apply_invoice(invoice, invoice_data)
-    invoice.lines.clear()
+    if is_new:
+        invoice.lines.clear()
+    else:
+        # SQLAlchemy may schedule relationship deletes after the replacement
+        # inserts. Delete and flush first because (invoice_id, line_number) is
+        # intentionally unique and the new invoice can reuse line numbers.
+        session.execute(
+            delete(SalesInvoiceLine).where(SalesInvoiceLine.invoice_id == invoice.id)
+        )
+        session.flush()
+        session.expire(invoice, ["lines"])
     invoice.lines.extend(
         SalesInvoiceLine(
             line_number=line.line_number,
