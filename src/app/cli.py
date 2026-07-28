@@ -11,6 +11,7 @@ from app.db.models import Tenant
 from app.db.session import get_session_factory
 from app.integrations.alegra.client import AlegraClient
 from app.integrations.alegra.resources import resolve_resources
+from app.services.analytics_mart import AnalyticsMartService
 from app.services.invoice_reconciliation import InvoiceReconciliationService
 from app.services.invoice_sync import InvoiceSyncService
 from app.services.resource_sync import BackfillProgress, HistoricalBackfillService
@@ -64,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="store listing responses only; use only for a faster non-canonical bootstrap",
     )
+
+    mart = subparsers.add_parser(
+        "refresh-mart",
+        help="Rebuild the tenant analytics data mart from operational PostgreSQL projections",
+    )
+    mart.add_argument("tenant_id", type=uuid.UUID)
     return parser
 
 
@@ -170,6 +177,12 @@ async def backfill_all(
     return all(result.status == "succeeded" for result in results)
 
 
+def refresh_mart(*, tenant_id: uuid.UUID) -> None:
+    with get_session_factory()() as session:
+        result = AnalyticsMartService(session=session).refresh(tenant_id=tenant_id)
+    print(f"{result.run_id} {result.status} written={result.records_written}")
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.command == "migrate":
@@ -202,6 +215,8 @@ def main() -> None:
         )
         if not succeeded:
             raise SystemExit(1)
+    elif args.command == "refresh-mart":
+        refresh_mart(tenant_id=args.tenant_id)
 
 
 if __name__ == "__main__":

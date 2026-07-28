@@ -50,6 +50,21 @@ vendedores, facturas de venta y compra, pagos, notas credito, ajustes y
 transferencias de inventario. La guia completa esta en
 `docs/architecture/phase-3-historical-backfill.md`.
 
+## Data mart analitico
+
+Una vez cargadas las proyecciones operativas, crea o refresca las dimensiones y
+hechos sin volver a consultar Alegra:
+
+```powershell
+python -m app.cli migrate
+python -m app.cli refresh-mart <tenant-uuid>
+```
+
+El comando es idempotente por tenant. En Railway debe ejecutarse como un Cron
+independiente, despues de la reconciliacion. Consulta
+`docs/architecture/phase-4-analytics-mart.md` para la granularidad, limites y
+consulta de dashboard.
+
 ## Documentación
 
 - [Fase 0](docs/architecture/phase-0.md)

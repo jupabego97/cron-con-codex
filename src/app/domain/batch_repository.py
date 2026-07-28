@@ -12,7 +12,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -88,7 +88,7 @@ def persist_resource_batch(
     tenant_id: uuid.UUID,
     resource: str,
     payloads: Iterable[dict[str, Any]],
-    sync_run_id: uuid.UUID,
+    sync_run_id: uuid.UUID | None = None,
 ) -> BatchWriteResult:
     """Store a batch with one database round trip per layer, not per record."""
     records_by_id = {_external_id(payload, resource): payload for payload in payloads}
@@ -140,7 +140,7 @@ def _upsert_raw_versions(
     tenant_id: uuid.UUID,
     resource: str,
     records: list[dict[str, Any]],
-    sync_run_id: uuid.UUID,
+    sync_run_id: uuid.UUID | None,
 ) -> int:
     values = [
         {
@@ -169,7 +169,7 @@ def _upsert_current_entities(
     tenant_id: uuid.UUID,
     resource: str,
     records: list[dict[str, Any]],
-    sync_run_id: uuid.UUID,
+    sync_run_id: uuid.UUID | None,
 ) -> None:
     values = [
         {
@@ -229,6 +229,35 @@ def _upsert_projection(
     }
     update_columns["updated_at"] = func.now()
     session.execute(statement.on_conflict_do_update(constraint=constraint, set_=update_columns))
+
+
+def mark_resource_projection_deleted(
+    session: Session, *, tenant_id: uuid.UUID, resource: str, external_id: str
+) -> bool:
+    """Soft-delete the generic and typed current-state projections for a webhook deletion."""
+    entity_result = session.execute(
+        update(AlegraEntity)
+        .where(
+            AlegraEntity.tenant_id == tenant_id,
+            AlegraEntity.resource == resource,
+            AlegraEntity.external_id == external_id,
+        )
+        .values(is_deleted=True, last_seen_at=func.now())
+    )
+    if resource == "invoice":
+        session.execute(
+            update(SalesInvoice)
+            .where(SalesInvoice.tenant_id == tenant_id, SalesInvoice.alegra_id == external_id)
+            .values(is_deleted=True, updated_at=func.now())
+        )
+    elif resource in _PROJECTIONS:
+        model, _ = _PROJECTIONS[resource]
+        session.execute(
+            update(model)
+            .where(model.tenant_id == tenant_id, model.alegra_id == external_id)
+            .values(is_deleted=True, updated_at=func.now())
+        )
+    return bool(entity_result.rowcount)
 
 
 def _replace_document_lines(
