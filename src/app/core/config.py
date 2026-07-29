@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from uuid import UUID
 
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,6 +24,9 @@ class Settings(BaseSettings):
     redis_url: str | None = None
     alegra_api_basic_token: SecretStr | None = None
     alegra_webhook_secret: SecretStr | None = None
+
+    dashboard_password: SecretStr | None = None
+    dashboard_tenant_id: UUID | None = None
 
     @model_validator(mode="after")
     def require_production_secrets(self) -> "Settings":

@@ -65,6 +65,12 @@ independiente, despues de la reconciliacion. Consulta
 `docs/architecture/phase-4-analytics-mart.md` para la granularidad, limites y
 consulta de dashboard.
 
+## Dashboard interno
+
+El dashboard React se sirve desde la misma URL del API. Configura
+`DASHBOARD_PASSWORD` y `DASHBOARD_TENANT_ID` en el servicio API, despliega y
+abre su dominio público. Consulta `docs/architecture/phase-5-dashboard.md`.
+
 ## Documentación
 
 - [Fase 0](docs/architecture/phase-0.md)

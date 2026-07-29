@@ -1,3 +1,12 @@
+FROM node:22-alpine AS dashboard-build
+
+WORKDIR /frontend
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -11,6 +20,7 @@ COPY src ./src
 COPY alembic.ini ./
 COPY migrations ./migrations
 RUN pip install --upgrade pip && pip install .
+COPY --from=dashboard-build /frontend/dist ./src/app/static
 
 EXPOSE 8000
 

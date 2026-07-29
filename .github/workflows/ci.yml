@@ -22,4 +22,12 @@ jobs:
         run: ruff check .
       - name: Test
         run: pytest
-
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build and test dashboard
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run test
+          npm run build

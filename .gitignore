@@ -16,6 +16,11 @@ htmlcov/
 .venv/
 venv/
 
+# Frontend build dependencies and output
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
 # Editors and operating systems
 .vscode/
 .idea/
@@ -29,4 +34,3 @@ logs/
 *.csv
 *.xlsx
 *.parquet
-
