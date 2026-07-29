@@ -58,13 +58,17 @@ def create_app() -> FastAPI:
     return app
 
 
-def _mount_dashboard(app: FastAPI) -> None:
+def _mount_dashboard(app: FastAPI, static_dir: Path | None = None) -> None:
     """Serve the compiled SPA only when it is included in the image."""
-    static_dir = Path(__file__).resolve().parent / "static"
+    static_dir = static_dir or Path(__file__).resolve().parent / "static"
     index_file = static_dir / "index.html"
     if not index_file.is_file():
         return
     app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="dashboard-assets")
+
+    @app.get("/", include_in_schema=False)
+    def dashboard_root() -> FileResponse:
+        return FileResponse(index_file)
 
     @app.get("/{path:path}", include_in_schema=False)
     def dashboard_spa(path: str) -> FileResponse:
