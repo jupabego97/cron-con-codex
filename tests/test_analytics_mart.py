@@ -18,6 +18,7 @@ def test_mart_queries_include_credit_notes_and_balanced_transfer_movements() -> 
     assert "-COALESCE(cnl.quantity, 0)" in statements
     assert "transfer_out" in statements
     assert "transfer_in" in statements
+    assert "NULL::numeric(18, 2)" in statements
 
 
 def test_mart_dimensions_are_loaded_from_operational_tables() -> None:

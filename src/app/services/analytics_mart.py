@@ -174,7 +174,8 @@ _FACTS = (
                to_char(si.issue_date, 'YYYYMMDD')::integer, dp.key, dc.key, ds.key, NULL,
                'invoice', si.alegra_id, si.alegra_id, si.status, sil.line_number,
                si.currency_code, COALESCE(sil.quantity, 0), sil.unit_price, 0, 0,
-               COALESCE(sil.line_total, 0), NULL, NULL, si.is_deleted
+               COALESCE(sil.line_total, 0), NULL::numeric(18, 2), NULL::numeric(18, 2),
+               si.is_deleted
         FROM sales_invoices si
         JOIN sales_invoice_lines sil ON sil.invoice_id = si.id
         JOIN dim_tenant dt ON dt.tenant_id = si.tenant_id
@@ -187,7 +188,8 @@ _FACTS = (
                to_char(cn.issue_date, 'YYYYMMDD')::integer, dp.key, dc.key, NULL, dw.key,
                'credit_note', cn.alegra_id, cn.document_number, cn.status, cnl.line_number,
                cn.currency_code, -COALESCE(cnl.quantity, 0), cnl.unit_price, 0, 0,
-               -COALESCE(cnl.line_total, 0), NULL, NULL, cn.is_deleted
+               -COALESCE(cnl.line_total, 0), NULL::numeric(18, 2), NULL::numeric(18, 2),
+               cn.is_deleted
         FROM credit_notes cn
         JOIN credit_note_lines cnl
           ON cnl.tenant_id = cn.tenant_id AND cnl.document_alegra_id = cn.alegra_id
