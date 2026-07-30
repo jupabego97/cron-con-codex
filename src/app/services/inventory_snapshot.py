@@ -88,8 +88,10 @@ class InventorySnapshotService:
                 insert = pg_insert(InventorySnapshot).values(rows).on_conflict_do_nothing(
                     constraint="uq_inventory_snapshot_run_warehouse_item"
                 )
-                result = self._session.execute(insert)
-                run.records_written = max(int(result.rowcount or 0), 0)
+                self._session.execute(insert)
+                # PostgreSQL may report rowcount=-1 for an INSERT .. ON CONFLICT
+                # statement even when it inserted rows. Rows are unique per new run.
+                run.records_written = len(rows)
             else:
                 run.records_written = 0
             run.status = "succeeded"
