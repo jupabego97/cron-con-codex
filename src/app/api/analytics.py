@@ -90,6 +90,27 @@ def get_inventory(
     return service.inventory(filters)
 
 
+@router.get("/customers")
+def get_customers(
+    filters: Annotated[AnalyticsFilters, Depends(build_filters)],
+    service: Annotated[AnalyticsQueryService, Depends(query_service)],
+) -> dict:
+    return service.customers(filters)
+
+
+@router.get("/products")
+def get_products(
+    filters: Annotated[AnalyticsFilters, Depends(build_filters)],
+    service: Annotated[AnalyticsQueryService, Depends(query_service)],
+) -> dict:
+    return service.products(filters)
+
+
+@router.get("/alerts")
+def get_alerts(service: Annotated[AnalyticsQueryService, Depends(query_service)]) -> dict:
+    return service.alerts()
+
+
 @router.get("/refresh-status")
 def get_refresh_status(service: Annotated[AnalyticsQueryService, Depends(query_service)]) -> dict:
     return service.refresh_status()

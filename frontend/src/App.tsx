@@ -14,7 +14,7 @@ import {
 import { api, Filters, Option, query } from "./api";
 import { money, number } from "./format";
 
-type Tab = "overview" | "sales" | "purchases" | "payments" | "inventory";
+type Tab = "overview" | "sales" | "purchases" | "payments" | "customers" | "products" | "inventory" | "alerts";
 type Row = Record<string, string | number | null>;
 type FilterData = {
   date_range: { min_date?: string; max_date?: string };
@@ -31,7 +31,10 @@ const tabs: Array<[Tab, string]> = [
   ["sales", "Ventas"],
   ["purchases", "Compras"],
   ["payments", "Pagos"],
+  ["customers", "Clientes"],
+  ["products", "Productos"],
   ["inventory", "Inventario"],
+  ["alerts", "Alertas"],
 ];
 
 function todayIso(): string {
@@ -186,6 +189,9 @@ function DashboardTab({ tab, data }: { tab: Tab; data: Record<string, unknown> |
   if (tab === "sales") return <DomainView title="Ventas" data={data} amountKey="amount" />;
   if (tab === "purchases") return <DomainView title="Compras" data={data} amountKey="amount" />;
   if (tab === "payments") return <DomainView title="Pagos" data={data} amountKey="amount" />;
+  if (tab === "customers") return <DomainView title="Clientes" data={data} amountKey="amount" />;
+  if (tab === "products") return <DomainView title="Productos y rotaciÃ³n" data={data} amountKey="amount" />;
+  if (tab === "alerts") return <Alerts data={data} />;
   return <Inventory data={data} />;
 }
 
@@ -226,6 +232,11 @@ function Inventory({ data }: { data: Record<string, unknown> }) {
   return <><h2>Inventario</h2><p className="muted">Existencias actuales por producto y bodega. Última captura: {String(snapshot.captured_at || "pendiente")}</p>{stockSummary.length ? <><section className="cards">{stockSummary.map((row) => <article className="metric-card" key="stock"><p>Existencias actuales</p><strong>{number(row.units)} unidades</strong><small>{number(row.products)} referencias · valor a costo: {money(row.inventory_value)}</small></article>)}</section><Chart title="Existencias por producto" data={(snapshot.by_product || []) as Row[]} dataKey="quantity" /><Chart title="Existencias por bodega" data={(snapshot.by_warehouse || []) as Row[]} dataKey="quantity" /><section className="table-card"><h3>Stock actual</h3><table><thead><tr><th>Producto</th><th>Bodega</th><th>Unidades</th><th>Costo unitario</th><th>Valor</th></tr></thead><tbody>{stockItems.map((row, index) => <tr key={`${row.product}-${row.warehouse}-${index}`}><td>{String(row.product)}</td><td>{String(row.warehouse)}</td><td>{number(row.quantity_on_hand)}</td><td>{money(row.unit_cost)}</td><td>{money(row.inventory_value)}</td></tr>)}</tbody></table></section></> : <div className="warning">Aún no existe un snapshot de inventario. Ejecuta la captura de inventario y luego refresca el mart.</div>}<h3 className="section-title">Movimientos de inventario</h3><p className="muted">Ajustes manuales y transferencias; no equivalen al stock disponible.</p><section className="cards">{summary.map((row) => <article className="metric-card compact" key={String(row.label)}><p>{labelFor(String(row.label))}</p><strong>{number(row.quantity)}</strong><small>unidades netas</small></article>)}</section><Chart title="Movimientos por producto" data={(data.by_product || []) as Row[]} dataKey="quantity" /><Chart title="Movimientos por bodega" data={(data.by_warehouse || []) as Row[]} dataKey="quantity" /><section className="table-card"><h3>Últimos movimientos</h3><table><thead><tr><th>Fecha</th><th>Producto</th><th>Bodega</th><th>Tipo</th><th>Cantidad</th></tr></thead><tbody>{recent.map((row, index) => <tr key={`${row.document_number}-${index}`}><td>{String(row.date || "")}</td><td>{String(row.product)}</td><td>{String(row.warehouse)}</td><td>{labelFor(String(row.movement_direction))}</td><td>{number(row.quantity_delta)}</td></tr>)}</tbody></table></section></>;
 }
 
+function Alerts({ data }: { data: Record<string, unknown> }) {
+  const summary = (data.summary || []) as Row[];
+  return <><h2>Alertas operativas</h2><p className="muted">PriorizaciÃ³n basada en el Ãºltimo snapshot y ventas de los Ãºltimos 90 dÃ­as.</p><section className="cards">{summary.map((row) => <article className="metric-card" key={String(row.label)}><p>{String(row.label)}</p><strong>{number(row.count)}</strong><small>productos que requieren revisiÃ³n</small></article>)}</section><Chart title="Agotados con venta reciente" data={(data.stockouts || []) as Row[]} dataKey="quantity" /><Chart title="Inventario negativo" data={(data.negative_stock || []) as Row[]} dataKey="quantity" /><Chart title="Stock sin ventas en 90 dÃ­as" data={(data.slow_stock || []) as Row[]} dataKey="quantity" /></>;
+}
+
 function Chart({ title, data, dataKey, moneyValue = false }: { title: string; data: Row[]; dataKey: string; moneyValue?: boolean }) {
   const rows = useMemo(() => data.map((row) => ({ ...row, label: String(row.label || row.period || "") })), [data]);
   if (!rows.length) return <section className="chart-card"><h3>{title}</h3><p className="muted">Sin datos para estos filtros.</p></section>;
@@ -234,5 +245,5 @@ function Chart({ title, data, dataKey, moneyValue = false }: { title: string; da
 }
 
 function labelFor(value: string): string {
-  return ({ by_product: "Por producto", by_supplier: "Por proveedor", by_type: "Por tipo", by_contact: "Por contacto", by_seller: "Por vendedor", by_warehouse: "Por bodega", by_customer: "Por cliente", by_status: "Por estado", adjustment: "Ajustes", transfer_in: "Entradas por transferencia", transfer_out: "Salidas por transferencia" }[value] || value).replaceAll("_", " ");
+  return ({ by_product: "Por producto", best_sellers: "MÃ¡s vendidos", stock_coverage: "Cobertura de stock", recent_customers: "Clientes recientes", by_supplier: "Por proveedor", by_type: "Por tipo", by_contact: "Por contacto", by_seller: "Por vendedor", by_warehouse: "Por bodega", by_customer: "Por cliente", by_status: "Por estado", adjustment: "Ajustes", transfer_in: "Entradas por transferencia", transfer_out: "Salidas por transferencia" }[value] || value).replaceAll("_", " ");
 }

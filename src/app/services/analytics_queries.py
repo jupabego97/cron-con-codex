@@ -242,6 +242,75 @@ class AnalyticsQueryService:
             ),
         }
 
+    def customers(self, filters: AnalyticsFilters) -> dict[str, Any]:
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        return {
+            "summary": self._rows(f"""SELECT f.currency_code, count(DISTINCT f.contact_key) AS customers,
+                count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
+                COALESCE(sum(f.net_sales_amount),0) AS amount
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key
+                WHERE {where} GROUP BY f.currency_code ORDER BY f.currency_code""", params),
+            "by_customer": self._rows(f"""SELECT COALESCE(c.name,'Sin cliente') AS label, f.currency_code,
+                COALESCE(sum(f.net_sales_amount),0) AS amount, count(DISTINCT f.document_alegra_id) AS documents
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key LEFT JOIN dim_contact c ON c.key=f.contact_key
+                WHERE {where} GROUP BY label,f.currency_code ORDER BY amount DESC LIMIT 20""", params),
+            "recent_customers": self._rows(f"""SELECT COALESCE(c.name,'Sin cliente') AS label, max(d.calendar_date) AS last_purchase,
+                COALESCE(sum(f.net_sales_amount),0) AS amount
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key LEFT JOIN dim_contact c ON c.key=f.contact_key
+                WHERE {where} GROUP BY label ORDER BY last_purchase DESC LIMIT 20""", params),
+        }
+
+    def products(self, filters: AnalyticsFilters) -> dict[str, Any]:
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        return {
+            "summary": self._rows(f"""SELECT f.currency_code, count(DISTINCT f.product_key) AS products,
+                COALESCE(sum(f.quantity),0) AS units, COALESCE(sum(f.net_sales_amount),0) AS amount
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key WHERE {where}
+                GROUP BY f.currency_code ORDER BY f.currency_code""", params),
+            "best_sellers": self._rows(f"""SELECT COALESCE(p.name,'Sin producto') AS label, f.currency_code,
+                COALESCE(sum(f.net_sales_amount),0) AS amount, COALESCE(sum(f.quantity),0) AS quantity
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key LEFT JOIN dim_product p ON p.key=f.product_key
+                WHERE {where} GROUP BY label,f.currency_code ORDER BY amount DESC LIMIT 25""", params),
+            "stock_coverage": self._stock_coverage(),
+        }
+
+    def alerts(self) -> dict[str, Any]:
+        run = self._one("""SELECT id FROM inventory_snapshot_runs WHERE tenant_id=:tenant_id AND status='succeeded'
+            ORDER BY finished_at DESC LIMIT 1""")
+        if run is None:
+            return {"summary": [], "stockouts": [], "negative_stock": [], "slow_stock": []}
+        params = {"snapshot_run_id": run["id"]}
+        return {
+            "summary": self._rows("""SELECT 'Agotados con venta reciente' AS label, count(*) AS count FROM (
+                SELECT f.product_key FROM fact_inventory_snapshot f WHERE f.tenant_id=:tenant_id AND f.snapshot_run_id=:snapshot_run_id
+                GROUP BY f.product_key HAVING sum(f.quantity_on_hand)<=0) stock
+                JOIN fact_sales_line s ON s.tenant_id=:tenant_id AND s.product_key=stock.product_key
+                JOIN dim_date d ON d.date_key=s.date_key WHERE s.is_deleted=false AND d.calendar_date>=current_date-interval '90 days'""", params),
+            "stockouts": self._rows("""SELECT COALESCE(p.name,'Sin producto') AS label, COALESCE(sum(f.quantity_on_hand),0) AS quantity
+                FROM fact_inventory_snapshot f LEFT JOIN dim_product p ON p.key=f.product_key
+                WHERE f.tenant_id=:tenant_id AND f.snapshot_run_id=:snapshot_run_id GROUP BY label HAVING sum(f.quantity_on_hand)<=0
+                ORDER BY quantity LIMIT 50""", params),
+            "negative_stock": self._rows("""SELECT COALESCE(p.name,'Sin producto') AS label, COALESCE(sum(f.quantity_on_hand),0) AS quantity
+                FROM fact_inventory_snapshot f LEFT JOIN dim_product p ON p.key=f.product_key
+                WHERE f.tenant_id=:tenant_id AND f.snapshot_run_id=:snapshot_run_id GROUP BY label HAVING sum(f.quantity_on_hand)<0 ORDER BY quantity LIMIT 50""", params),
+            "slow_stock": self._stock_without_sales(params),
+        }
+
+    def _stock_coverage(self) -> list[dict[str, Any]]:
+        run = self._one("SELECT id FROM inventory_snapshot_runs WHERE tenant_id=:tenant_id AND status='succeeded' ORDER BY finished_at DESC LIMIT 1")
+        if run is None:
+            return []
+        return self._rows("""WITH stock AS (SELECT product_key,sum(quantity_on_hand) quantity FROM fact_inventory_snapshot WHERE tenant_id=:tenant_id AND snapshot_run_id=:run GROUP BY product_key),
+          sales AS (SELECT product_key,sum(quantity) quantity FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key WHERE f.tenant_id=:tenant_id AND f.is_deleted=false AND d.calendar_date>=current_date-interval '30 days' GROUP BY product_key)
+          SELECT COALESCE(p.name,'Sin producto') label,stock.quantity,round(stock.quantity/nullif(sales.quantity/30,0),1) AS coverage_days
+          FROM stock JOIN sales ON sales.product_key=stock.product_key LEFT JOIN dim_product p ON p.key=stock.product_key WHERE stock.quantity>0 ORDER BY coverage_days ASC NULLS LAST LIMIT 30""", {"run":run["id"]})
+
+    def _stock_without_sales(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        return self._rows("""SELECT COALESCE(p.name,'Sin producto') AS label,sum(f.quantity_on_hand) AS quantity
+          FROM fact_inventory_snapshot f LEFT JOIN dim_product p ON p.key=f.product_key WHERE f.tenant_id=:tenant_id AND f.snapshot_run_id=:snapshot_run_id
+          AND NOT EXISTS (SELECT 1 FROM fact_sales_line s JOIN dim_date d ON d.date_key=s.date_key WHERE s.tenant_id=f.tenant_id AND s.product_key=f.product_key AND s.is_deleted=false AND d.calendar_date>=current_date-interval '90 days')
+          GROUP BY label HAVING sum(f.quantity_on_hand)>0 ORDER BY quantity DESC LIMIT 30""", params)
+
     def _inventory_snapshot(self, filters: AnalyticsFilters) -> dict[str, Any]:
         run = self._one(
             """
