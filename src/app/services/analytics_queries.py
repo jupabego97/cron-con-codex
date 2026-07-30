@@ -196,6 +196,7 @@ class AnalyticsQueryService:
             allow_currency=False,
         )
         return {
+            "snapshot": self._inventory_snapshot(filters),
             "summary": self._rows(
                 f"""
                 SELECT f.movement_direction AS label, COALESCE(sum(f.quantity_delta), 0) AS quantity
@@ -236,6 +237,69 @@ class AnalyticsQueryService:
                 LEFT JOIN dim_product p ON p.key = f.product_key
                 LEFT JOIN dim_warehouse w ON w.key = f.warehouse_key
                 WHERE {where} ORDER BY d.calendar_date DESC, f.key DESC LIMIT 100
+                """,
+                params,
+            ),
+        }
+
+    def _inventory_snapshot(self, filters: AnalyticsFilters) -> dict[str, Any]:
+        run = self._one(
+            """
+            SELECT id, finished_at FROM inventory_snapshot_runs
+            WHERE tenant_id = :tenant_id AND status = 'succeeded'
+            ORDER BY finished_at DESC LIMIT 1
+            """
+        )
+        if run is None:
+            return {"captured_at": None, "summary": [], "by_product": [], "by_warehouse": [], "items": []}
+        clauses = ["f.tenant_id = :tenant_id", "f.snapshot_run_id = :snapshot_run_id"]
+        params: dict[str, Any] = {"snapshot_run_id": run["id"]}
+        if filters.product_key is not None:
+            clauses.append("f.product_key = :product_key")
+            params["product_key"] = filters.product_key
+        if filters.warehouse_key is not None:
+            clauses.append("f.warehouse_key = :warehouse_key")
+            params["warehouse_key"] = filters.warehouse_key
+        where = " AND ".join(clauses)
+        return {
+            "captured_at": run["finished_at"],
+            "summary": self._rows(
+                f"""
+                SELECT count(*) AS products, COALESCE(sum(f.quantity_on_hand), 0) AS units,
+                       COALESCE(sum(f.inventory_value), 0) AS inventory_value
+                FROM fact_inventory_snapshot f WHERE {where}
+                HAVING count(*) > 0
+                """,
+                params,
+            ),
+            "by_product": self._rows(
+                f"""
+                SELECT COALESCE(p.name, 'Sin producto') AS label, COALESCE(sum(f.quantity_on_hand), 0) AS quantity,
+                       COALESCE(sum(f.inventory_value), 0) AS inventory_value
+                FROM fact_inventory_snapshot f
+                LEFT JOIN dim_product p ON p.key = f.product_key
+                WHERE {where} GROUP BY label ORDER BY quantity DESC LIMIT 50
+                """,
+                params,
+            ),
+            "by_warehouse": self._rows(
+                f"""
+                SELECT COALESCE(w.name, 'Sin bodega') AS label, COALESCE(sum(f.quantity_on_hand), 0) AS quantity,
+                       COALESCE(sum(f.inventory_value), 0) AS inventory_value
+                FROM fact_inventory_snapshot f
+                LEFT JOIN dim_warehouse w ON w.key = f.warehouse_key
+                WHERE {where} GROUP BY label ORDER BY quantity DESC
+                """,
+                params,
+            ),
+            "items": self._rows(
+                f"""
+                SELECT COALESCE(p.name, 'Sin producto') AS product, COALESCE(w.name, 'Sin bodega') AS warehouse,
+                       f.quantity_on_hand, f.unit_cost, f.inventory_value
+                FROM fact_inventory_snapshot f
+                LEFT JOIN dim_product p ON p.key = f.product_key
+                LEFT JOIN dim_warehouse w ON w.key = f.warehouse_key
+                WHERE {where} ORDER BY f.quantity_on_hand ASC, product LIMIT 100
                 """,
                 params,
             ),

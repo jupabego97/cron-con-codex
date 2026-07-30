@@ -12,6 +12,7 @@ from app.db.session import get_session_factory
 from app.integrations.alegra.client import AlegraClient
 from app.integrations.alegra.resources import resolve_resources
 from app.services.analytics_mart import AnalyticsMartService
+from app.services.inventory_snapshot import InventorySnapshotService
 from app.services.invoice_reconciliation import InvoiceReconciliationService
 from app.services.invoice_sync import InvoiceSyncService
 from app.services.resource_sync import BackfillProgress, HistoricalBackfillService
@@ -71,6 +72,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rebuild the tenant analytics data mart from operational PostgreSQL projections",
     )
     mart.add_argument("tenant_id", type=uuid.UUID)
+
+    inventory_snapshot = subparsers.add_parser(
+        "snapshot-inventory",
+        help="Capture current Alegra stock by warehouse into immutable snapshots",
+    )
+    inventory_snapshot.add_argument("tenant_id", type=uuid.UUID)
+    inventory_snapshot.add_argument("--warehouse-concurrency", type=int, default=3)
     return parser
 
 
@@ -183,6 +191,26 @@ def refresh_mart(*, tenant_id: uuid.UUID) -> None:
     print(f"{result.run_id} {result.status} written={result.records_written}")
 
 
+async def snapshot_inventory(
+    *, tenant_id: uuid.UUID, warehouse_concurrency: int
+) -> None:
+    settings = get_settings()
+    if settings.alegra_api_basic_token is None:
+        raise RuntimeError("ALEGRA_API_BASIC_TOKEN is required for snapshot-inventory")
+    with get_session_factory()() as session:
+        async with AlegraClient(
+            basic_token=settings.alegra_api_basic_token.get_secret_value(),
+            requests_per_minute=110,
+        ) as alegra:
+            result = await InventorySnapshotService(session=session, alegra=alegra).capture(
+                tenant_id=tenant_id, warehouse_concurrency=warehouse_concurrency
+            )
+    print(
+        f"{result.run_id} {result.status} read={result.records_read} "
+        f"written={result.records_written}"
+    )
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.command == "migrate":
@@ -217,6 +245,13 @@ def main() -> None:
             raise SystemExit(1)
     elif args.command == "refresh-mart":
         refresh_mart(tenant_id=args.tenant_id)
+    elif args.command == "snapshot-inventory":
+        asyncio.run(
+            snapshot_inventory(
+                tenant_id=args.tenant_id,
+                warehouse_concurrency=args.warehouse_concurrency,
+            )
+        )
 
 
 if __name__ == "__main__":

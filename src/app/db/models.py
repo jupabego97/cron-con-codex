@@ -417,3 +417,45 @@ class MartRefreshRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     records_written: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class InventorySnapshotRun(Base):
+    __tablename__ = "inventory_snapshot_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    records_read: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    records_written: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class InventorySnapshot(Base):
+    __tablename__ = "inventory_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_run_id",
+            "warehouse_alegra_id",
+            "item_alegra_id",
+            name="uq_inventory_snapshot_run_warehouse_item",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    snapshot_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("inventory_snapshot_runs.id"), nullable=False, index=True
+    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    warehouse_alegra_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    item_alegra_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    item_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    quantity_on_hand: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)

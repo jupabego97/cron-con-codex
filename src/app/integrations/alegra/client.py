@@ -133,6 +133,7 @@ class AlegraClient:
         start: int,
         limit: int = 30,
         metadata: bool = False,
+        filters: dict[str, str] | None = None,
     ) -> ResourcePage:
         """Read a page from any catalogued, offset-paginated Alegra resource."""
         if start < 0:
@@ -146,6 +147,7 @@ class AlegraClient:
         if resource.order_field is not None:
             params["order_field"] = resource.order_field
             params["order_direction"] = "ASC"
+        params.update(filters or {})
         payload = await self._get_json(resource.collection_path, params=params)
         return _parse_resource_page(payload)
 
@@ -171,6 +173,7 @@ class AlegraClient:
         page_concurrency: int = 4,
         hydrate_details: bool | None = None,
         detail_concurrency: int = 6,
+        filters: dict[str, str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream a complete resource history with bounded concurrent page/detail reads.
 
@@ -181,7 +184,9 @@ class AlegraClient:
             raise ValueError("concurrency values must be positive")
         if hydrate_details is None:
             hydrate_details = resource.hydrate_details_by_default
-        first_page = await self.list_resource_page(resource, start=0, metadata=True)
+        first_page = await self.list_resource_page(
+            resource, start=0, metadata=True, filters=filters
+        )
         async for record in self._hydrate_records(
             resource,
             first_page.data,
@@ -194,7 +199,7 @@ class AlegraClient:
             start = len(first_page.data)
             page = first_page
             while page.data:
-                page = await self.list_resource_page(resource, start=start)
+                page = await self.list_resource_page(resource, start=start, filters=filters)
                 async for record in self._hydrate_records(
                     resource,
                     page.data,
@@ -208,7 +213,10 @@ class AlegraClient:
         offsets = range(30, first_page.total, 30)
         for offset_batch in _batches(offsets, page_concurrency):
             pages = await asyncio.gather(
-                *(self.list_resource_page(resource, start=offset) for offset in offset_batch)
+                *(
+                    self.list_resource_page(resource, start=offset, filters=filters)
+                    for offset in offset_batch
+                )
             )
             for page in pages:
                 async for record in self._hydrate_records(

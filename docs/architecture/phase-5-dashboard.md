@@ -28,6 +28,16 @@ corresponda. Ventas, compras y pagos se agrupan por moneda: no se suman monedas
 distintas. Los documentos no eliminados se incluyen sin excluir estados; el
 selector de estado permite validar los resultados contra Alegra.
 
-El inventario muestra movimiento neto, ajustes y transferencias, no una
-valorización contable. Margen histórico, impuestos y descuentos por línea se
-mantienen fuera de los KPIs hasta que su fuente sea confiable.
+## Existencias actuales
+
+El inventario separa dos conceptos: **Existencias actuales** proviene del ultimo
+snapshot de Alegra por producto y bodega; **Movimientos de inventario** solo
+muestra ajustes y transferencias para auditoria. Ejecuta primero
+`snapshot-inventory` y despues `refresh-mart` para poblar las existencias. El
+valor a costo es informativo, segun el costo devuelto por Alegra, y no sustituye
+una valorizacion contable.
+
+Los movimientos muestran ajustes y transferencias; no deben usarse para
+reconstruir existencias ni para una valorización contable. Margen histórico,
+impuestos y descuentos por línea se mantienen fuera de los KPIs hasta que su
+fuente sea confiable.

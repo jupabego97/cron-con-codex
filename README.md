@@ -65,6 +65,22 @@ independiente, despues de la reconciliacion. Consulta
 `docs/architecture/phase-4-analytics-mart.md` para la granularidad, limites y
 consulta de dashboard.
 
+## Existencias actuales de inventario
+
+Los ajustes y transferencias no representan el stock actual. Para consultar el
+saldo por producto y bodega, captura primero el inventario real desde Alegra y
+luego proyectalo al mart:
+
+```powershell
+python -m app.cli snapshot-inventory <tenant-uuid>
+python -m app.cli refresh-mart <tenant-uuid>
+```
+
+En Railway, el Cron de captura requiere `DATABASE_URL` y
+`ALEGRA_API_BASIC_TOKEN`; el Cron de refresco del mart solo requiere
+`DATABASE_URL`. La configuracion recomendada esta en
+`docs/architecture/phase-4-analytics-mart.md`.
+
 ## Dashboard interno
 
 El dashboard React se sirve desde la misma URL del API. Configura

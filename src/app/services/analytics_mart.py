@@ -135,6 +135,7 @@ _DIMENSIONS = (
           UNION SELECT issue_date FROM credit_notes WHERE tenant_id = :tenant_id
           UNION SELECT adjustment_date FROM inventory_adjustments WHERE tenant_id = :tenant_id
           UNION SELECT transfer_date FROM warehouse_transfers WHERE tenant_id = :tenant_id
+          UNION SELECT captured_at::date FROM inventory_snapshots WHERE tenant_id = :tenant_id
         )
         INSERT INTO dim_date
           (date_key, calendar_date, year, quarter, month, day, iso_week, day_of_week, is_weekend)
@@ -156,6 +157,7 @@ _DELETE_FACTS = tuple(
     text(f"DELETE FROM {table} WHERE tenant_id = :tenant_id")
     for table in (
         "fact_inventory_movement",
+        "fact_inventory_snapshot",
         "fact_payment",
         "fact_purchase_line",
         "fact_sales_line",
@@ -231,6 +233,25 @@ _FACTS = (
         JOIN dim_tenant dt ON dt.tenant_id = p.tenant_id
         LEFT JOIN dim_contact dc ON dc.tenant_id = p.tenant_id AND dc.alegra_id = p.contact_alegra_id
         WHERE p.tenant_id = :tenant_id
+        """
+    ),
+    text(
+        """
+        INSERT INTO fact_inventory_snapshot
+          (tenant_id, tenant_key, date_key, product_key, warehouse_key, snapshot_run_id,
+           captured_at, quantity_on_hand, unit_cost, inventory_value)
+        SELECT snapshot.tenant_id, tenant.key,
+               to_char(snapshot.captured_at::date, 'YYYYMMDD')::integer,
+               product.key, warehouse.key, snapshot.snapshot_run_id, snapshot.captured_at,
+               snapshot.quantity_on_hand, snapshot.unit_cost,
+               snapshot.quantity_on_hand * snapshot.unit_cost
+        FROM inventory_snapshots snapshot
+        JOIN dim_tenant tenant ON tenant.tenant_id = snapshot.tenant_id
+        LEFT JOIN dim_product product
+          ON product.tenant_id = snapshot.tenant_id AND product.alegra_id = snapshot.item_alegra_id
+        LEFT JOIN dim_warehouse warehouse
+          ON warehouse.tenant_id = snapshot.tenant_id AND warehouse.alegra_id = snapshot.warehouse_alegra_id
+        WHERE snapshot.tenant_id = :tenant_id
         """
     ),
     text(

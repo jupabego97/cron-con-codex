@@ -25,12 +25,19 @@ histórica confiable.
 | `fact_purchase_line` | una línea de factura de compra |
 | `fact_payment` | un pago Alegra |
 | `fact_inventory_movement` | un ajuste, o una mitad de una transferencia |
+| `fact_inventory_snapshot` | la existencia de un producto en una bodega en una captura puntual |
 
 Las notas crédito entran a `fact_sales_line` con cantidad e importe negativos.
 Cada transferencia produce dos hechos: `transfer_out` negativo en la bodega de
 origen y `transfer_in` positivo en la bodega destino. Los ajustes conservan el
 signo recibido de Alegra. Los dashboards deben filtrar `is_deleted = false` y
 aplicar los estados de documento que defina cada indicador.
+
+Las existencias no se reconstruyen sumando ajustes y transferencias: Alegra es
+la fuente del saldo actual. El comando `snapshot-inventory` consulta los
+productos inventariables por cada bodega y guarda una captura inmutable en
+`inventory_snapshots`; el mart la proyecta a `fact_inventory_snapshot`. Los
+movimientos siguen siendo una herramienta de auditoria, no una medida de stock.
 
 Los campos de descuento e impuesto comienzan en cero porque las tablas
 operativas actuales no exponen esos importes por línea de forma estable. Son
@@ -43,6 +50,7 @@ Después de que haya datos operativos, ejecute:
 
 ```powershell
 python -m app.cli migrate
+python -m app.cli snapshot-inventory <tenant-uuid>
 python -m app.cli refresh-mart <tenant-uuid>
 ```
 
@@ -51,6 +59,18 @@ elimina únicamente los hechos de ese tenant y los recalcula en la misma
 transacción. Repetirlo no duplica datos y una anulación/eliminación de la capa
 operativa se refleja en el mart. Cada ejecución queda auditada en
 `mart_refresh_runs`.
+
+Para Railway crea un Cron independiente (sin dominio) para la captura:
+
+```text
+python -m app.cli snapshot-inventory <tenant-uuid>
+```
+
+Como punto de partida, programa este Cron a `5 */4 * * *` (cada cuatro horas,
+UTC). Requiere `DATABASE_URL` y `ALEGRA_API_BASIC_TOKEN`. Programa el Cron de
+`refresh-mart` para `25 */4 * * *`, despues de la captura; ese segundo Cron
+solo requiere `DATABASE_URL`. Si mantienes el mart cada hora, tambien es
+correcto: hara refrescos sin una nueva captura entre medias.
 
 Para Railway, cree un servicio **Cron** independiente (sin dominio) con:
 
