@@ -9,6 +9,7 @@ from alembic.config import Config
 from app.core.config import get_settings
 from app.db.models import Tenant
 from app.db.session import get_session_factory
+from app.domain.batch_repository import rebuild_purchase_bill_lines
 from app.integrations.alegra.client import AlegraClient
 from app.integrations.alegra.resources import resolve_resources
 from app.services.analytics_mart import AnalyticsMartService
@@ -79,6 +80,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inventory_snapshot.add_argument("tenant_id", type=uuid.UUID)
     inventory_snapshot.add_argument("--warehouse-concurrency", type=int, default=3)
+
+    repair_purchases = subparsers.add_parser(
+        "repair-purchase-lines",
+        help="Rebuild purchase lines from stored canonical bill payloads without calling Alegra",
+    )
+    repair_purchases.add_argument("tenant_id", type=uuid.UUID)
+    repair_purchases.add_argument("--write-batch-size", type=int, default=200)
     return parser
 
 
@@ -191,6 +199,14 @@ def refresh_mart(*, tenant_id: uuid.UUID) -> None:
     print(f"{result.run_id} {result.status} written={result.records_written}")
 
 
+def repair_purchase_lines(*, tenant_id: uuid.UUID, write_batch_size: int) -> None:
+    with get_session_factory()() as session:
+        documents, lines = rebuild_purchase_bill_lines(
+            session, tenant_id=tenant_id, write_batch_size=write_batch_size
+        )
+    print(f"documents={documents} lines={lines}")
+
+
 async def snapshot_inventory(
     *, tenant_id: uuid.UUID, warehouse_concurrency: int
 ) -> None:
@@ -245,6 +261,11 @@ def main() -> None:
             raise SystemExit(1)
     elif args.command == "refresh-mart":
         refresh_mart(tenant_id=args.tenant_id)
+    elif args.command == "repair-purchase-lines":
+        repair_purchase_lines(
+            tenant_id=args.tenant_id,
+            write_batch_size=args.write_batch_size,
+        )
     elif args.command == "snapshot-inventory":
         asyncio.run(
             snapshot_inventory(

@@ -125,6 +125,50 @@ def persist_resource_batch(
     )
 
 
+def rebuild_purchase_bill_lines(
+    session: Session, *, tenant_id: uuid.UUID, write_batch_size: int = 200
+) -> tuple[int, int]:
+    """Rebuild bill lines from durable canonical payloads without calling Alegra.
+
+    Alegra returns bill details under ``purchases.items`` rather than the
+    ``items`` field used by invoice-like documents. This repair is safe to run
+    repeatedly because each batch replaces lines for its own source documents.
+    """
+    if write_batch_size < 1:
+        raise ValueError("write_batch_size must be positive")
+    records: list[dict[str, Any]] = []
+    documents_processed = 0
+    lines_written = 0
+    statement = (
+        select(PurchaseBill.payload)
+        .where(PurchaseBill.tenant_id == tenant_id)
+        .order_by(PurchaseBill.alegra_id)
+    )
+    for payload in session.scalars(statement).yield_per(write_batch_size):
+        if not isinstance(payload, dict):
+            continue
+        records.append(payload)
+        if len(records) >= write_batch_size:
+            documents, lines = _rebuild_purchase_line_batch(session, tenant_id, records)
+            documents_processed += documents
+            lines_written += lines
+            records = []
+    if records:
+        documents, lines = _rebuild_purchase_line_batch(session, tenant_id, records)
+        documents_processed += documents
+        lines_written += lines
+    return documents_processed, lines_written
+
+
+def _rebuild_purchase_line_batch(
+    session: Session, tenant_id: uuid.UUID, records: list[dict[str, Any]]
+) -> tuple[int, int]:
+    lines = sum(len(_document_items(payload) or []) for payload in records)
+    _replace_document_lines(session, tenant_id=tenant_id, resource="bill", records=records)
+    session.commit()
+    return len(records), lines
+
+
 def _prepare_record(payload: dict[str, Any], resource: str) -> dict[str, Any]:
     external_id = _external_id(payload, resource)
     return {
@@ -500,6 +544,10 @@ def _line_value(
 
 def _document_items(payload: dict[str, Any]) -> list[dict[str, Any]] | None:
     items = payload.get("items")
+    if not isinstance(items, list):
+        purchases = payload.get("purchases")
+        if isinstance(purchases, dict):
+            items = purchases.get("items")
     if not isinstance(items, list):
         return None
     return [item for item in items if isinstance(item, dict)]
