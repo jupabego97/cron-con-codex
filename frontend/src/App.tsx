@@ -241,7 +241,14 @@ function Chart({ title, data, dataKey, moneyValue = false }: { title: string; da
   const rows = useMemo(() => data.map((row) => ({ ...row, label: String(row.label || row.period || "") })), [data]);
   if (!rows.length) return <section className="chart-card"><h3>{title}</h3><p className="muted">Sin datos para estos filtros.</p></section>;
   const trend = "period" in rows[0];
-  return <section className="chart-card"><h3>{title}</h3><div className="chart">{trend ? <ResponsiveContainer><LineChart data={rows}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="label" /><YAxis /><Tooltip formatter={(value) => moneyValue ? money(value as number) : number(value as number)} /><Line type="monotone" dataKey={dataKey} stroke="#76e4d0" strokeWidth={2} /></LineChart></ResponsiveContainer> : <ResponsiveContainer><BarChart data={rows}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="label" hide={rows.length > 8} /><YAxis /><Tooltip formatter={(value) => moneyValue ? money(value as number) : number(value as number)} /><Bar dataKey={dataKey} fill="#7c83fd" radius={[4, 4, 0, 0]} /></BarChart></ResponsiveContainer>}</div></section>;
+  const axis = { fill: "#c7d4ea", fontSize: 12 };
+  const tooltip = {
+    contentStyle: { background: "#101a2d", border: "1px solid #536b91", borderRadius: 8, color: "#ffffff" },
+    labelStyle: { color: "#dbeafe" },
+    itemStyle: { color: "#ffffff" },
+    cursor: { fill: "#ffffff10" },
+  };
+  return <section className="chart-card"><h3>{title}</h3><div className="chart">{trend ? <ResponsiveContainer><LineChart data={rows}><CartesianGrid stroke="#334866" strokeDasharray="3 3" /><XAxis dataKey="label" tick={axis} axisLine={{ stroke: "#536b91" }} tickLine={{ stroke: "#536b91" }} /><YAxis tick={axis} axisLine={{ stroke: "#536b91" }} tickLine={{ stroke: "#536b91" }} /><Tooltip {...tooltip} formatter={(value) => moneyValue ? money(value as number) : number(value as number)} /><Line type="monotone" dataKey={dataKey} stroke="#78f3d3" strokeWidth={2.5} /></LineChart></ResponsiveContainer> : <ResponsiveContainer><BarChart data={rows}><CartesianGrid stroke="#334866" strokeDasharray="3 3" /><XAxis dataKey="label" hide={rows.length > 8} tick={axis} axisLine={{ stroke: "#536b91" }} tickLine={{ stroke: "#536b91" }} /><YAxis tick={axis} axisLine={{ stroke: "#536b91" }} tickLine={{ stroke: "#536b91" }} /><Tooltip {...tooltip} formatter={(value) => moneyValue ? money(value as number) : number(value as number)} /><Bar dataKey={dataKey} fill="#91a7ff" radius={[4, 4, 0, 0]} /></BarChart></ResponsiveContainer>}</div></section>;
 }
 
 function labelFor(value: string): string {
