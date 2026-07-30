@@ -220,7 +220,7 @@ function DomainView({ title, data, amountKey }: { title: string; data: Record<st
   const summary = (data.summary || []) as Row[];
   const series = (data.series || []) as Row[];
   const sections = Object.entries(data).filter(([key]) => !["summary", "series"].includes(key));
-  return <><h2>{title}</h2><section className="cards">{summary.map((row) => <article className="metric-card compact" key={String(row.currency_code || row.label)}><p>{String(row.currency_code || row.label || "Total")}</p><strong>{money(row.amount ?? row.purchase_amount, String(row.currency_code || "COP"))}</strong><small>{number(row.documents ?? row.payments ?? row.quantity)} registros</small></article>)}</section><Chart title={`${title} en el tiempo`} data={series} dataKey={amountKey} moneyValue />{sections.map(([key, value]) => Array.isArray(value) ? <Chart key={key} title={labelFor(key)} data={value as Row[]} dataKey={amountKey} moneyValue /> : null)}</>;
+  return <><h2>{title}</h2><section className="cards">{summary.map((row) => <article className="metric-card compact" key={String(row.currency_code || row.label)}><p>{String(row.currency_code || row.label || "Total")}</p><strong>{money(row.amount ?? row.purchase_amount, String(row.currency_code || "COP"))}</strong><small>{number(row.documents ?? row.payments ?? row.quantity)} registros</small></article>)}</section><Chart title={`${title} en el tiempo`} data={series} dataKey={amountKey} moneyValue />{sections.map(([key, value]) => Array.isArray(value) ? <Chart key={key} title={labelFor(key)} data={value as Row[]} dataKey={key === "stock_coverage" ? "coverage_days" : amountKey} moneyValue={key !== "stock_coverage"} /> : null)}</>;
 }
 
 function Inventory({ data }: { data: Record<string, unknown> }) {
