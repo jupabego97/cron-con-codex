@@ -14,7 +14,7 @@ import {
 import { api, Filters, Option, query } from "./api";
 import { money, number } from "./format";
 
-type Tab = "overview" | "sales" | "purchases" | "payments" | "customers" | "products" | "inventory" | "alerts";
+type Tab = "overview" | "sales" | "purchases" | "payments" | "customers" | "products" | "kpis" | "inventory" | "alerts";
 type Row = Record<string, string | number | null>;
 type FilterData = {
   date_range: { min_date?: string; max_date?: string };
@@ -33,6 +33,7 @@ const tabs: Array<[Tab, string]> = [
   ["payments", "Pagos"],
   ["customers", "Clientes"],
   ["products", "Productos"],
+  ["kpis", "Indicadores"],
   ["inventory", "Inventario"],
   ["alerts", "Alertas"],
 ];
@@ -191,6 +192,7 @@ function DashboardTab({ tab, data }: { tab: Tab; data: Record<string, unknown> |
   if (tab === "payments") return <DomainView title="Pagos" data={data} amountKey="amount" />;
   if (tab === "customers") return <DomainView title="Clientes" data={data} amountKey="amount" />;
   if (tab === "products") return <DomainView title="Productos y rotaciÃ³n" data={data} amountKey="amount" />;
+  if (tab === "kpis") return <KpiView data={data} />;
   if (tab === "alerts") return <Alerts data={data} />;
   return <Inventory data={data} />;
 }
@@ -214,6 +216,47 @@ function MetricCard({ currency, current, previous }: { currency: string; current
   const before = Number(previous?.net_sales || 0);
   const change = before ? ((sale - before) / Math.abs(before)) * 100 : null;
   return <article className="metric-card"><p>{currency} · Venta neta</p><strong>{money(sale, currency)}</strong><small>{change === null ? "Sin período comparable" : `${change >= 0 ? "+" : ""}${change.toFixed(1)}% vs. período anterior`}</small><dl><div><dt>Unidades</dt><dd>{number(current.units)}</dd></div><div><dt>Documentos</dt><dd>{number(current.documents)}</dd></div><div><dt>Ticket promedio</dt><dd>{money(current.average_ticket, currency)}</dd></div></dl></article>;
+}
+
+function percent(value: string | number | null | undefined): string {
+  return `${number(value)}%`;
+}
+
+function KpiView({ data }: { data: Record<string, unknown> }) {
+  const sales = (data.sales || []) as Row[];
+  const customers = (data.customers || []) as Row[];
+  const purchases = (data.purchases || []) as Row[];
+  const inventory = (data.inventory || []) as Row[];
+  const lowCoverage = (data.low_coverage || []) as Row[];
+  const excessCoverage = (data.excess_coverage || []) as Row[];
+  const slowInventory = (data.slow_inventory || []) as Row[];
+  return <>
+    <h2>Indicadores clave</h2>
+    <p className="muted">KPIs calculados desde el mart. La cobertura usa la demanda neta del período seleccionado y el último snapshot de Alegra.</p>
+    <h3 className="section-title">Venta y devoluciones</h3>
+    <section className="cards">{sales.map((row) => {
+      const currency = String(row.currency_code || "COP");
+      return <article className="metric-card" key={currency}><p>{currency} · Unidades por transacción</p><strong>{number(row.units_per_transaction)}</strong><small>unidades netas por documento</small><dl><div><dt>Venta neta</dt><dd>{money(row.net_sales, currency)}</dd></div><div><dt>Precio neto/unidad</dt><dd>{money(row.average_unit_sale, currency)}</dd></div><div><dt>Notas crédito</dt><dd>{percent(row.credit_note_rate)}</dd></div></dl></article>;
+    })}</section>
+    <h3 className="section-title">Clientes</h3>
+    <section className="cards">{customers.map((row) => <article className="metric-card" key={String(row.currency_code || "COP")}><p>{String(row.currency_code || "COP")} · Clientes activos</p><strong>{number(row.active_customers)}</strong><small>con compra o nota crédito en el período</small><dl><div><dt>Recurrentes</dt><dd>{percent(row.repeat_customer_rate)}</dd></div><div><dt>Nuevos</dt><dd>{number(row.new_customers)}</dd></div><div><dt>Concentración Top 5</dt><dd>{percent(row.top_5_customer_concentration)}</dd></div></dl></article>)}</section>
+    <h3 className="section-title">Compras y proveedores</h3>
+    <section className="cards">{purchases.map((row) => {
+      const currency = String(row.currency_code || "COP");
+      return <article className="metric-card" key={currency}><p>{currency} · Ticket promedio de compra</p><strong>{money(row.average_purchase_ticket, currency)}</strong><small>{number(row.documents)} documentos de compra</small><dl><div><dt>Costo por unidad</dt><dd>{money(row.average_unit_cost, currency)}</dd></div><div><dt>Proveedores</dt><dd>{number(row.suppliers)}</dd></div><div><dt>Concentración Top 5</dt><dd>{percent(row.top_5_supplier_concentration)}</dd></div></dl></article>;
+    })}</section>
+    <h3 className="section-title">Salud del inventario</h3>
+    <section className="cards">{inventory.map((row) => <article className="metric-card" key="inventory-health"><p>Referencias en el último snapshot</p><strong>{number(row.products)}</strong><small>valor a costo reportado: {money(row.inventory_value)}</small><dl><div><dt>Sin disponibilidad</dt><dd>{number(row.unavailable_products)}</dd></div><div><dt>Cobertura &lt; 14 días</dt><dd>{number(row.low_coverage_products)}</dd></div><div><dt>Sin demanda</dt><dd>{money(row.no_demand_value)}</dd></div></dl></article>)}</section>
+    <Chart title="Productos con cobertura menor a 14 días" data={lowCoverage} dataKey="coverage_days" />
+    <StockPriorityTable title="Reposición prioritaria" rows={lowCoverage} coverage />
+    <StockPriorityTable title="Exceso de cobertura (120 días o más)" rows={excessCoverage} coverage />
+    <StockPriorityTable title="Inventario sin demanda en el período" rows={slowInventory} />
+  </>;
+}
+
+function StockPriorityTable({ title, rows, coverage = false }: { title: string; rows: Row[]; coverage?: boolean }) {
+  if (!rows.length) return <section className="table-card"><h3>{title}</h3><p className="muted">Sin productos para estos criterios.</p></section>;
+  return <section className="table-card"><h3>{title}</h3><table><thead><tr><th>Producto</th><th>Stock</th><th>Unidades vendidas</th>{coverage && <th>Cobertura</th>}<th>Valor a costo</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.label}-${index}`}><td>{String(row.label)}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.period_units_sold)}</td>{coverage && <td>{number(row.coverage_days)} días</td>}<td>{money(row.inventory_value)}</td></tr>)}</tbody></table></section>;
 }
 
 function DomainView({ title, data, amountKey }: { title: string; data: Record<string, unknown>; amountKey: string }) {

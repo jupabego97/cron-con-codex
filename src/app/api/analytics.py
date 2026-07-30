@@ -106,6 +106,14 @@ def get_products(
     return service.products(filters)
 
 
+@router.get("/kpis")
+def get_kpis(
+    filters: Annotated[AnalyticsFilters, Depends(build_filters)],
+    service: Annotated[AnalyticsQueryService, Depends(query_service)],
+) -> dict:
+    return service.kpis(filters)
+
+
 @router.get("/alerts")
 def get_alerts(service: Annotated[AnalyticsQueryService, Depends(query_service)]) -> dict:
     return service.alerts()

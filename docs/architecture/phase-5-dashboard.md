@@ -41,3 +41,17 @@ Los movimientos muestran ajustes y transferencias; no deben usarse para
 reconstruir existencias ni para una valorización contable. Margen histórico,
 impuestos y descuentos por línea se mantienen fuera de los KPIs hasta que su
 fuente sea confiable.
+
+## Indicadores clave
+
+La pestaña **Indicadores** utiliza únicamente hechos y dimensiones del mart. Incluye
+unidades por transacción, precio neto por unidad, tasa de notas crédito, clientes
+recurrentes y nuevos, concentración de clientes/proveedores y ticket/costo promedio
+de compra. Para el inventario muestra referencias sin disponibilidad, cobertura menor
+a 14 días, exceso de cobertura (120 días o más) e inventario sin demanda dentro del
+período filtrado.
+
+La cobertura es `stock actual / demanda neta diaria del período seleccionado`; sirve
+para priorizar reposición, no para valorar inventario. No se muestran rotación
+contable, GMROI, margen ni cartera hasta contar con costo histórico por venta,
+snapshots de inventario suficientes y saldos de documentos confiables.

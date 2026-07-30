@@ -274,6 +274,20 @@ class AnalyticsQueryService:
             "stock_coverage": self._stock_coverage(),
         }
 
+    def kpis(self, filters: AnalyticsFilters) -> dict[str, Any]:
+        """Actionable retail KPIs calculated exclusively from the analytics mart.
+
+        The inventory measures use the most recent Alegra snapshot. Coverage is
+        based on the net unit demand inside the selected dashboard period; it is
+        a replenishment signal, not an accounting inventory-turn calculation.
+        """
+        return {
+            "sales": self._sales_kpis(filters),
+            "customers": self._customer_kpis(filters),
+            "purchases": self._purchase_kpis(filters),
+            **self._inventory_kpis(filters),
+        }
+
     def alerts(self) -> dict[str, Any]:
         run = self._one("""SELECT id FROM inventory_snapshot_runs WHERE tenant_id=:tenant_id AND status='succeeded'
             ORDER BY finished_at DESC LIMIT 1""")
@@ -304,6 +318,184 @@ class AnalyticsQueryService:
           sales AS (SELECT product_key,sum(quantity) quantity FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key WHERE f.tenant_id=:tenant_id AND f.is_deleted=false AND d.calendar_date>=current_date-interval '30 days' GROUP BY product_key)
           SELECT COALESCE(p.name,'Sin producto') label,stock.quantity,round(stock.quantity/nullif(sales.quantity/30,0),1) AS coverage_days
           FROM stock JOIN sales ON sales.product_key=stock.product_key LEFT JOIN dim_product p ON p.key=stock.product_key WHERE stock.quantity>0 ORDER BY coverage_days ASC NULLS LAST LIMIT 30""", {"run":run["id"]})
+
+    def _sales_kpis(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        return self._rows(
+            f"""
+            SELECT f.currency_code,
+                   COALESCE(sum(f.net_sales_amount), 0) AS net_sales,
+                   COALESCE(sum(f.quantity), 0) AS units,
+                   count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
+                   COALESCE(sum(f.quantity) / NULLIF(count(DISTINCT (f.document_type, f.document_alegra_id)), 0), 0) AS units_per_transaction,
+                   COALESCE(sum(f.net_sales_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_sale,
+                   COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'invoice'), 0) AS invoice_sales,
+                   abs(COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'credit_note'), 0)) AS credit_note_amount,
+                   COALESCE(abs(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'credit_note')) /
+                     NULLIF(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'invoice'), 0) * 100, 0) AS credit_note_rate
+            FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+            WHERE {where}
+            GROUP BY f.currency_code ORDER BY f.currency_code
+            """,
+            params,
+        )
+
+    def _customer_kpis(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        return self._rows(
+            f"""
+            WITH filtered_documents AS (
+              SELECT f.currency_code, f.contact_key, f.document_type, f.document_alegra_id,
+                     min(d.calendar_date) AS document_date, sum(f.net_sales_amount) AS amount
+              FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+              WHERE {where} AND f.contact_key IS NOT NULL
+              GROUP BY f.currency_code, f.contact_key, f.document_type, f.document_alegra_id
+            ), customer_period AS (
+              SELECT currency_code, contact_key, count(*) AS documents, sum(amount) AS amount
+              FROM filtered_documents
+              GROUP BY currency_code, contact_key
+            ), first_invoice AS (
+              SELECT f.currency_code, f.contact_key, min(d.calendar_date) AS first_purchase_date
+              FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+              WHERE f.tenant_id = :tenant_id AND f.is_deleted = false
+                AND f.document_type = 'invoice' AND f.contact_key IS NOT NULL
+              GROUP BY f.currency_code, f.contact_key
+            ), ranked AS (
+              SELECT cp.*, fi.first_purchase_date,
+                     row_number() OVER (PARTITION BY cp.currency_code ORDER BY cp.amount DESC) AS customer_rank
+              FROM customer_period cp
+              LEFT JOIN first_invoice fi ON fi.currency_code = cp.currency_code AND fi.contact_key = cp.contact_key
+            )
+            SELECT currency_code, count(*) AS active_customers,
+                   count(*) FILTER (WHERE documents >= 2) AS repeat_customers,
+                   COALESCE(count(*) FILTER (WHERE documents >= 2)::numeric / NULLIF(count(*), 0) * 100, 0) AS repeat_customer_rate,
+                   count(*) FILTER (WHERE first_purchase_date BETWEEN :from_date AND :to_date) AS new_customers,
+                   COALESCE(sum(amount) FILTER (WHERE customer_rank <= 5) / NULLIF(sum(amount), 0) * 100, 0) AS top_5_customer_concentration
+            FROM ranked
+            GROUP BY currency_code ORDER BY currency_code
+            """,
+            params,
+        )
+
+    def _purchase_kpis(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        where, params = self._fact_where(filters, alias="f", allow_seller=False, allow_status=True)
+        return self._rows(
+            f"""
+            WITH filtered AS (
+              SELECT f.currency_code, f.provider_key, f.document_alegra_id, f.quantity, f.purchase_amount
+              FROM fact_purchase_line f JOIN dim_date d ON d.date_key = f.date_key
+              WHERE {where}
+            ), summary AS (
+              SELECT currency_code, sum(purchase_amount) AS purchase_amount, sum(quantity) AS units,
+                     count(DISTINCT document_alegra_id) AS documents, count(DISTINCT provider_key) AS suppliers
+              FROM filtered GROUP BY currency_code
+            ), supplier_spend AS (
+              SELECT currency_code, provider_key, sum(purchase_amount) AS amount
+              FROM filtered WHERE provider_key IS NOT NULL GROUP BY currency_code, provider_key
+            ), ranked_suppliers AS (
+              SELECT *, row_number() OVER (PARTITION BY currency_code ORDER BY amount DESC) AS supplier_rank
+              FROM supplier_spend
+            )
+            SELECT s.currency_code, s.purchase_amount, s.units, s.documents, s.suppliers,
+                   COALESCE(s.purchase_amount / NULLIF(s.documents, 0), 0) AS average_purchase_ticket,
+                   COALESCE(s.purchase_amount / NULLIF(s.units, 0), 0) AS average_unit_cost,
+                   COALESCE(sum(rs.amount) FILTER (WHERE rs.supplier_rank <= 5) /
+                     NULLIF(s.purchase_amount, 0) * 100, 0) AS top_5_supplier_concentration
+            FROM summary s LEFT JOIN ranked_suppliers rs ON rs.currency_code = s.currency_code
+            GROUP BY s.currency_code, s.purchase_amount, s.units, s.documents, s.suppliers
+            ORDER BY s.currency_code
+            """,
+            params,
+        )
+
+    def _inventory_kpis(self, filters: AnalyticsFilters) -> dict[str, list[dict[str, Any]]]:
+        run = self._one(
+            "SELECT id FROM inventory_snapshot_runs WHERE tenant_id=:tenant_id AND status='succeeded' ORDER BY finished_at DESC LIMIT 1"
+        )
+        empty = {"inventory": [], "low_coverage": [], "excess_coverage": [], "slow_inventory": []}
+        if run is None:
+            return empty
+        stock_clauses = ["f.tenant_id = :tenant_id", "f.snapshot_run_id = :snapshot_run_id", "f.product_key IS NOT NULL"]
+        params: dict[str, Any] = {"snapshot_run_id": run["id"], "from_date": filters.from_date, "to_date": filters.to_date}
+        if filters.product_key is not None:
+            stock_clauses.append("f.product_key = :product_key")
+            params["product_key"] = filters.product_key
+        if filters.warehouse_key is not None:
+            stock_clauses.append("f.warehouse_key = :warehouse_key")
+            params["warehouse_key"] = filters.warehouse_key
+        stock_where = " AND ".join(stock_clauses)
+        demand_where, demand_params = self._fact_where(filters, alias="s", allow_seller=True, allow_status=True, allow_warehouse=False)
+        params.update(demand_params)
+        base = f"""
+            WITH stock AS (
+              SELECT f.product_key, sum(f.quantity_on_hand) AS quantity_on_hand,
+                     sum(f.inventory_value) AS inventory_value
+              FROM fact_inventory_snapshot f WHERE {stock_where}
+              GROUP BY f.product_key
+            ), demand AS (
+              SELECT s.product_key, sum(s.quantity) AS units_sold
+              FROM fact_sales_line s JOIN dim_date d ON d.date_key = s.date_key
+              WHERE {demand_where} AND s.product_key IS NOT NULL
+              GROUP BY s.product_key
+            ), coverage AS (
+              SELECT stock.product_key, stock.quantity_on_hand, stock.inventory_value,
+                     COALESCE(demand.units_sold, 0) AS period_units_sold,
+                     CASE WHEN COALESCE(demand.units_sold, 0) > 0
+                       THEN round(stock.quantity_on_hand /
+                         (demand.units_sold / (:to_date - :from_date + 1)), 1) END AS coverage_days
+              FROM stock LEFT JOIN demand ON demand.product_key = stock.product_key
+            )
+        """
+        return {
+            "inventory": self._rows(
+                base
+                + """
+                SELECT count(*) AS products, COALESCE(sum(quantity_on_hand), 0) AS units,
+                       COALESCE(sum(inventory_value), 0) AS inventory_value,
+                       count(*) FILTER (WHERE quantity_on_hand <= 0) AS unavailable_products,
+                       count(*) FILTER (WHERE quantity_on_hand < 0) AS negative_products,
+                       count(*) FILTER (WHERE coverage_days > 0 AND coverage_days < 14) AS low_coverage_products,
+                       count(*) FILTER (WHERE coverage_days >= 120) AS excess_coverage_products,
+                       count(*) FILTER (WHERE quantity_on_hand > 0 AND period_units_sold <= 0) AS no_demand_products,
+                       COALESCE(sum(inventory_value) FILTER (WHERE quantity_on_hand > 0 AND period_units_sold <= 0), 0) AS no_demand_value
+                FROM coverage
+                """,
+                params,
+            ),
+            "low_coverage": self._rows(
+                base
+                + """
+                SELECT COALESCE(p.name, 'Sin producto') AS label, coverage.quantity_on_hand,
+                       coverage.period_units_sold, coverage.coverage_days, coverage.inventory_value
+                FROM coverage LEFT JOIN dim_product p ON p.key = coverage.product_key
+                WHERE coverage.coverage_days > 0 AND coverage.coverage_days < 14
+                ORDER BY coverage.coverage_days ASC, coverage.period_units_sold DESC LIMIT 30
+                """,
+                params,
+            ),
+            "excess_coverage": self._rows(
+                base
+                + """
+                SELECT COALESCE(p.name, 'Sin producto') AS label, coverage.quantity_on_hand,
+                       coverage.period_units_sold, coverage.coverage_days, coverage.inventory_value
+                FROM coverage LEFT JOIN dim_product p ON p.key = coverage.product_key
+                WHERE coverage.coverage_days >= 120
+                ORDER BY coverage.inventory_value DESC NULLS LAST LIMIT 30
+                """,
+                params,
+            ),
+            "slow_inventory": self._rows(
+                base
+                + """
+                SELECT COALESCE(p.name, 'Sin producto') AS label, coverage.quantity_on_hand,
+                       coverage.period_units_sold, coverage.inventory_value
+                FROM coverage LEFT JOIN dim_product p ON p.key = coverage.product_key
+                WHERE coverage.quantity_on_hand > 0 AND coverage.period_units_sold <= 0
+                ORDER BY coverage.inventory_value DESC NULLS LAST LIMIT 30
+                """,
+                params,
+            ),
+        }
 
     def _stock_without_sales(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         return self._rows("""SELECT COALESCE(p.name,'Sin producto') AS label,sum(f.quantity_on_hand) AS quantity
