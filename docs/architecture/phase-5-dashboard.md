@@ -11,12 +11,17 @@ En el servicio **API** agrega estas variables, sin comillas:
 ```text
 DASHBOARD_PASSWORD=<contraseña-larga-y-única>
 DASHBOARD_TENANT_ID=<UUID-real-del-tenant>
+DASHBOARD_MONTHLY_SALES_TARGET_COP=<meta-mensual-en-COP-opcional>
 ```
 
 Conserva `APP_SECRET_KEY` configurada. El cookie de sesión es `HttpOnly`, usa
 `SameSite=Lax` y se marca `Secure` cuando `APP_ENV=production`.
 
 No agregues estas variables a los servicios Cron: no las necesitan.
+
+Si configuras `DASHBOARD_MONTHLY_SALES_TARGET_COP`, el KPI de ventas mostrarÃ¡ el
+ritmo diario observado frente al ritmo diario requerido para la meta del mes. No se
+asume una meta automÃ¡tica a partir de las ventas histÃ³ricas.
 
 Al terminar el deploy, abre la URL pública del servicio API. La raíz mostrará
 el formulario de acceso; las rutas de salud y webhooks se mantienen intactas.
@@ -55,3 +60,11 @@ La cobertura es `stock actual / demanda neta diaria del período seleccionado`; 
 para priorizar reposición, no para valorar inventario. No se muestran rotación
 contable, GMROI, margen ni cartera hasta contar con costo histórico por venta,
 snapshots de inventario suficientes y saldos de documentos confiables.
+
+## RecomendaciÃ³n de compra
+
+La pestaÃ±a **Reponer** produce una cola de revisiÃ³n a partir del Ãºltimo snapshot,
+la demanda neta del rango seleccionado y el costo unitario disponible. Por defecto
+busca completar 30 dÃ­as de cobertura, considera 7 dÃ­as de plazo y 7 dÃ­as de
+seguridad, y clasifica cada referencia como crÃ­tica, alta o media. Solo recomienda
+productos con demanda observada; no crea Ã³rdenes automÃ¡ticas.

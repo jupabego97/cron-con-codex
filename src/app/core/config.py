@@ -1,3 +1,4 @@
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 from uuid import UUID
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
 
     dashboard_password: SecretStr | None = None
     dashboard_tenant_id: UUID | None = None
+    dashboard_monthly_sales_target_cop: Decimal | None = None
 
     @model_validator(mode="after")
     def require_production_secrets(self) -> "Settings":

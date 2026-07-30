@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.dashboard import require_dashboard_session
+from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.services.analytics_queries import AnalyticsFilters, AnalyticsQueryService
 
@@ -42,7 +43,12 @@ def query_service(
     tenant_id: Annotated[UUID, Depends(require_dashboard_session)],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> AnalyticsQueryService:
-    return AnalyticsQueryService(session=session, tenant_id=tenant_id)
+    settings = get_settings()
+    return AnalyticsQueryService(
+        session=session,
+        tenant_id=tenant_id,
+        monthly_sales_target_cop=settings.dashboard_monthly_sales_target_cop,
+    )
 
 
 @router.get("/filters")
@@ -112,6 +118,24 @@ def get_kpis(
     service: Annotated[AnalyticsQueryService, Depends(query_service)],
 ) -> dict:
     return service.kpis(filters)
+
+
+@router.get("/purchase-recommendations")
+def get_purchase_recommendations(
+    filters: Annotated[AnalyticsFilters, Depends(build_filters)],
+    service: Annotated[AnalyticsQueryService, Depends(query_service)],
+    target_coverage_days: Annotated[int, Query(ge=7, le=365)] = 30,
+    lead_time_days: Annotated[int, Query(ge=0, le=90)] = 7,
+    safety_days: Annotated[int, Query(ge=0, le=90)] = 7,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> dict:
+    return service.purchase_recommendations(
+        filters,
+        target_coverage_days=target_coverage_days,
+        lead_time_days=lead_time_days,
+        safety_days=safety_days,
+        limit=limit,
+    )
 
 
 @router.get("/alerts")

@@ -14,7 +14,7 @@ import {
 import { api, Filters, Option, query } from "./api";
 import { money, number } from "./format";
 
-type Tab = "overview" | "sales" | "purchases" | "payments" | "customers" | "products" | "kpis" | "inventory" | "alerts";
+type Tab = "overview" | "sales" | "purchases" | "payments" | "customers" | "products" | "kpis" | "purchase-recommendations" | "inventory" | "alerts";
 type Row = Record<string, string | number | null>;
 type FilterData = {
   date_range: { min_date?: string; max_date?: string };
@@ -34,6 +34,7 @@ const tabs: Array<[Tab, string]> = [
   ["customers", "Clientes"],
   ["products", "Productos"],
   ["kpis", "Indicadores"],
+  ["purchase-recommendations", "Reponer"],
   ["inventory", "Inventario"],
   ["alerts", "Alertas"],
 ];
@@ -193,6 +194,7 @@ function DashboardTab({ tab, data }: { tab: Tab; data: Record<string, unknown> |
   if (tab === "customers") return <DomainView title="Clientes" data={data} amountKey="amount" />;
   if (tab === "products") return <DomainView title="Productos y rotaciÃ³n" data={data} amountKey="amount" />;
   if (tab === "kpis") return <KpiView data={data} />;
+  if (tab === "purchase-recommendations") return <PurchaseRecommendations data={data} />;
   if (tab === "alerts") return <Alerts data={data} />;
   return <Inventory data={data} />;
 }
@@ -236,7 +238,7 @@ function KpiView({ data }: { data: Record<string, unknown> }) {
     <h3 className="section-title">Venta y devoluciones</h3>
     <section className="cards">{sales.map((row) => {
       const currency = String(row.currency_code || "COP");
-      return <article className="metric-card" key={currency}><p>{currency} · Unidades por transacción</p><strong>{number(row.units_per_transaction)}</strong><small>unidades netas por documento</small><dl><div><dt>Venta neta</dt><dd>{money(row.net_sales, currency)}</dd></div><div><dt>Precio neto/unidad</dt><dd>{money(row.average_unit_sale, currency)}</dd></div><div><dt>Notas crédito</dt><dd>{percent(row.credit_note_rate)}</dd></div></dl></article>;
+      return <article className="metric-card" key={currency}><p>{currency} · Unidades por transacción</p><strong>{number(row.units_per_transaction)}</strong><small>{row.sales_pace_vs_target_pct == null ? "Meta mensual no configurada" : `${number(row.sales_pace_vs_target_pct)}% del ritmo meta`}</small><dl><div><dt>Venta neta</dt><dd>{money(row.net_sales, currency)}</dd></div><div><dt>Ticket promedio</dt><dd>{money(row.average_ticket, currency)}</dd></div><div><dt>Precio neto/unidad</dt><dd>{money(row.average_unit_sale, currency)}</dd></div><div><dt>Notas crédito</dt><dd>{percent(row.credit_note_rate)}</dd></div></dl></article>;
     })}</section>
     <h3 className="section-title">Clientes</h3>
     <section className="cards">{customers.map((row) => <article className="metric-card" key={String(row.currency_code || "COP")}><p>{String(row.currency_code || "COP")} · Clientes activos</p><strong>{number(row.active_customers)}</strong><small>con compra o nota crédito en el período</small><dl><div><dt>Recurrentes</dt><dd>{percent(row.repeat_customer_rate)}</dd></div><div><dt>Nuevos</dt><dd>{number(row.new_customers)}</dd></div><div><dt>Concentración Top 5</dt><dd>{percent(row.top_5_customer_concentration)}</dd></div></dl></article>)}</section>
@@ -257,6 +259,29 @@ function KpiView({ data }: { data: Record<string, unknown> }) {
 function StockPriorityTable({ title, rows, coverage = false }: { title: string; rows: Row[]; coverage?: boolean }) {
   if (!rows.length) return <section className="table-card"><h3>{title}</h3><p className="muted">Sin productos para estos criterios.</p></section>;
   return <section className="table-card"><h3>{title}</h3><table><thead><tr><th>Producto</th><th>Stock</th><th>Unidades vendidas</th>{coverage && <th>Cobertura</th>}<th>Valor a costo</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.label}-${index}`}><td>{String(row.label)}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.period_units_sold)}</td>{coverage && <td>{number(row.coverage_days)} días</td>}<td>{money(row.inventory_value)}</td></tr>)}</tbody></table></section>;
+}
+
+function PurchaseRecommendations({ data }: { data: Record<string, unknown> }) {
+  const rows = (data.items || []) as Row[];
+  const parameters = (data.parameters || {}) as Row;
+  const counts = rows.reduce<Record<string, number>>((result, row) => {
+    const priority = String(row.priority || "medium");
+    result[priority] = (result[priority] || 0) + 1;
+    return result;
+  }, {});
+  const estimatedValue = rows.reduce((total, row) => total + Number(row.estimated_purchase_value || 0), 0);
+  return <>
+    <h2>Recomendación de compra</h2>
+    <p className="muted">Cola priorizada para revisión manual. Sugiere cantidades, no crea órdenes ni reemplaza la negociación con el proveedor.</p>
+    <section className="cards">
+      <article className="metric-card"><p>Productos sugeridos</p><strong>{number(rows.length)}</strong><small>{number(parameters.target_coverage_days)} días de cobertura objetivo</small></article>
+      <article className="metric-card"><p>Críticos / agotados</p><strong>{number(counts.critical || 0)}</strong><small>con demanda neta reciente</small></article>
+      <article className="metric-card"><p>Alta prioridad</p><strong>{number(counts.high || 0)}</strong><small>no alcanzan plazo + seguridad</small></article>
+      <article className="metric-card"><p>Compra estimada</p><strong>{money(estimatedValue)}</strong><small>costo reportado; confirmar moneda y proveedor</small></article>
+    </section>
+    <div className="warning">La demanda se calcula entre {String(parameters.demand_from || "")} y {String(parameters.demand_to || "")}. El stock se toma del último snapshot y, si filtras una bodega, la demanda sigue siendo global porque las facturas actuales no tienen bodega confiable.</div>
+    {!rows.length ? <div className="empty">No hay recomendaciones para estos filtros. Revisa si existe un snapshot y si los productos tienen demanda reciente.</div> : <section className="table-card"><h3>Cola de reposición</h3><table><thead><tr><th>Prioridad</th><th>Producto</th><th>Proveedor sugerido</th><th>Stock</th><th>Velocidad/día</th><th>Cobertura</th><th>Comprar</th><th>Costo estimado</th><th>Motivo</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.product}-${index}`}><td>{String(row.priority)}</td><td>{String(row.product)}{row.reference ? ` · ${String(row.reference)}` : ""}</td><td>{String(row.preferred_supplier || "Sin proveedor")}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.daily_velocity)}</td><td>{row.coverage_days == null ? "Agotado" : `${number(row.coverage_days)} días`}</td><td>{number(row.recommended_quantity)}</td><td>{money(row.estimated_purchase_value, String(row.currency_code || "COP"))}</td><td>{String(row.reason)}</td></tr>)}</tbody></table></section>}
+  </>;
 }
 
 function DomainView({ title, data, amountKey }: { title: string; data: Record<string, unknown>; amountKey: string }) {
