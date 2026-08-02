@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Any
 from uuid import UUID
 
@@ -925,11 +925,596 @@ class AnalyticsQueryService:
                 "velocity_90_days": 90,
             }
         )
+        raw_items = self._rows(statement, params)
+        policy_context = self._replenishment_policy_context(
+            (filters.currency or "COP").upper()
+        )
+        items = self._decorate_replenishment_items(
+            raw_items,
+            policy_context=policy_context,
+            target_coverage_days=target_coverage_days,
+            lead_time_days=lead_time_days,
+            safety_days=safety_days,
+        )
+        supplier_orders = self._supplier_purchase_plans(items, filters.to_date)
+        policies = self.replenishment_policies((filters.currency or "COP").upper())
+        parameters.update(
+            {
+                "order_up_to_days": target_coverage_days + lead_time_days + safety_days,
+                "velocity_7_days": 7,
+                "velocity_30_days": 30,
+                "velocity_90_days": 90,
+            }
+        )
+        summary = {
+            "recommended_products": len(items),
+            "critical_products": sum(1 for item in items if item["priority"] == "critical"),
+            "suppliers_to_buy": sum(
+                1 for order in supplier_orders
+                if order["decision"] in {"buy_now", "complete_order"}
+            ),
+            "suppliers_to_accumulate": sum(
+                1 for order in supplier_orders if order["decision"] == "accumulate"
+            ),
+            "suppliers_to_review": sum(
+                1 for order in supplier_orders if order["decision"] == "review"
+            ),
+            "estimated_value": sum(
+                (item["estimated_purchase_value"] for item in items),
+                Decimal("0"),
+            ),
+        }
         return {
             "snapshot_at": run["finished_at"],
             "parameters": parameters,
-            "items": self._rows(statement, params),
+            "items": items,
+            "supplier_orders": supplier_orders,
+            "supplier_policies": policies["supplier_policies"],
+            "product_policies": policies["product_policies"],
+            "summary": summary,
             **self._replenishment_opportunities(filters, run["id"]),
+        }
+
+    def _replenishment_policy_context(self, currency_code: str) -> dict[str, Any]:
+        supplier_rows = self._rows(
+            """
+            SELECT p.supplier_key, c.name AS supplier, p.currency_code,
+                   p.minimum_order_amount, p.shipping_cost,
+                   p.free_shipping_threshold, p.default_lead_time_days,
+                   p.max_wait_days, p.priority, p.notes
+            FROM supplier_replenishment_policies p
+            JOIN dim_contact c ON c.key = p.supplier_key
+            WHERE p.tenant_id = :tenant_id
+              AND c.tenant_id = :tenant_id
+              AND p.currency_code = :currency_code
+              AND p.active = true
+            """,
+            {"currency_code": currency_code},
+        )
+        product_rows = self._rows(
+            """
+            SELECT p.supplier_key, p.product_key, p.currency_code,
+                   p.minimum_order_quantity, p.pack_size, p.lead_time_days,
+                   p.max_wait_days, p.is_preferred, p.notes,
+                   c.name AS supplier, d.name AS product
+            FROM supplier_product_policies p
+            JOIN dim_contact c ON c.key = p.supplier_key
+            JOIN dim_product d ON d.key = p.product_key
+            WHERE p.tenant_id = :tenant_id
+              AND c.tenant_id = :tenant_id
+              AND d.tenant_id = :tenant_id
+              AND p.currency_code = :currency_code
+              AND p.active = true
+            """,
+            {"currency_code": currency_code},
+        )
+        preferred_rows = self._rows(
+            """
+            SELECT pp.product_key, pp.supplier_key, c.name AS supplier,
+                   pp.minimum_order_quantity, pp.pack_size,
+                   pp.lead_time_days, pp.max_wait_days,
+                   s.line_share_pct, s.unit_share_pct, s.purchase_line_count,
+                   s.average_unit_cost, s.last_unit_cost, s.last_purchase_date
+            FROM supplier_product_policies pp
+            JOIN supplier_product_stats s
+              ON s.tenant_id = pp.tenant_id
+             AND s.product_key = pp.product_key
+             AND s.supplier_key = pp.supplier_key
+             AND s.currency_code = pp.currency_code
+            JOIN dim_contact c ON c.key = pp.supplier_key
+            WHERE pp.tenant_id = :tenant_id
+              AND c.tenant_id = :tenant_id
+              AND pp.currency_code = :currency_code
+              AND pp.active = true
+              AND pp.is_preferred = true
+            """,
+            {"currency_code": currency_code},
+        )
+        return {
+            "suppliers": {int(row["supplier_key"]): row for row in supplier_rows},
+            "products": {
+                (int(row["product_key"]), int(row["supplier_key"])): row
+                for row in product_rows
+            },
+            "preferred": {int(row["product_key"]): row for row in preferred_rows},
+        }
+
+    def _decorate_replenishment_items(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        policy_context: dict[str, Any],
+        target_coverage_days: int,
+        lead_time_days: int,
+        safety_days: int,
+    ) -> list[dict[str, Any]]:
+        suppliers = policy_context["suppliers"]
+        products = policy_context["products"]
+        preferred_rows = policy_context["preferred"]
+        for item in items:
+            product_key = int(item["product_key"])
+            preferred = preferred_rows.get(product_key)
+            if preferred is not None:
+                item["supplier_key"] = preferred["supplier_key"]
+                item["preferred_supplier"] = preferred["supplier"]
+                item["supplier_source"] = "politica_producto"
+                item["supplier_confidence_pct"] = preferred.get("line_share_pct") or 0
+                item["last_unit_cost"] = preferred.get("last_unit_cost")
+                item["last_purchase_date"] = preferred.get("last_purchase_date")
+                item["unit_cost"] = (
+                    preferred.get("last_unit_cost")
+                    or preferred.get("average_unit_cost")
+                    or item.get("unit_cost")
+                    or 0
+                )
+            supplier_key = item.get("supplier_key")
+            supplier_key = int(supplier_key) if supplier_key is not None else None
+            supplier_policy = suppliers.get(supplier_key) if supplier_key is not None else None
+            product_policy = (
+                products.get((product_key, supplier_key))
+                if supplier_key is not None
+                else None
+            )
+            item["minimum_order_quantity"] = (
+                product_policy.get("minimum_order_quantity")
+                if product_policy is not None
+                else None
+            )
+            item["pack_size"] = (
+                product_policy.get("pack_size")
+                if product_policy is not None
+                else Decimal("1")
+            )
+            item["effective_lead_time_days"] = int(
+                (
+                    product_policy.get("lead_time_days")
+                    if product_policy and product_policy.get("lead_time_days") is not None
+                    else supplier_policy.get("default_lead_time_days")
+                    if supplier_policy is not None
+                    else lead_time_days
+                )
+                or lead_time_days
+            )
+            item["effective_max_wait_days"] = int(
+                (
+                    product_policy.get("max_wait_days")
+                    if product_policy and product_policy.get("max_wait_days") is not None
+                    else supplier_policy.get("max_wait_days")
+                    if supplier_policy is not None
+                    else 7
+                )
+                or 7
+            )
+            item["minimum_order_amount"] = (
+                supplier_policy.get("minimum_order_amount")
+                if supplier_policy is not None
+                else None
+            )
+            item["shipping_cost"] = (
+                supplier_policy.get("shipping_cost") or Decimal("0")
+                if supplier_policy is not None
+                else Decimal("0")
+            )
+            item["free_shipping_threshold"] = (
+                supplier_policy.get("free_shipping_threshold")
+                if supplier_policy is not None
+                else None
+            )
+            item["policy_configured"] = bool(supplier_policy or product_policy)
+            item["policy_source"] = (
+                "producto" if product_policy else "proveedor" if supplier_policy else "estandar"
+            )
+            item["supplier_options"] = [
+                self._decorate_supplier_option(option, product_key, suppliers, products)
+                for option in (item.get("supplier_options") or [])
+            ]
+            if preferred is not None:
+                preferred_option = {
+                    "supplier_key": preferred["supplier_key"],
+                    "supplier": preferred["supplier"],
+                    "is_modal": False,
+                    "is_preferred": True,
+                    "confidence_pct": preferred.get("line_share_pct") or 0,
+                    "unit_share_pct": preferred.get("unit_share_pct") or 0,
+                    "purchase_lines": preferred.get("purchase_line_count") or 0,
+                    "average_unit_cost": preferred.get("average_unit_cost"),
+                    "last_unit_cost": preferred.get("last_unit_cost"),
+                    "last_purchase_date": preferred.get("last_purchase_date"),
+                }
+                item["supplier_options"] = [
+                    preferred_option,
+                    *[
+                        option
+                        for option in item["supplier_options"]
+                        if option.get("supplier_key") != preferred["supplier_key"]
+                    ],
+                ][:3]
+            daily_velocity = Decimal(str(item.get("daily_velocity", 0) or 0))
+            stock = Decimal(str(item.get("quantity_on_hand", 0) or 0))
+            minimum = Decimal(str(item.get("minimum_order_quantity", 0) or 0))
+            pack = Decimal(str(item.get("pack_size", 1) or 1))
+            order_up_to_days = (
+                target_coverage_days + item["effective_lead_time_days"] + safety_days
+            )
+            base_quantity = max(daily_velocity * order_up_to_days - stock, Decimal("0"))
+            if base_quantity > 0:
+                quantity = max(base_quantity, minimum)
+                quantity = (quantity / pack).to_integral_value(rounding=ROUND_CEILING) * pack
+            else:
+                quantity = Decimal("0")
+            item["order_up_to_days"] = order_up_to_days
+            item["recommended_quantity"] = quantity
+            item["estimated_purchase_value"] = quantity * Decimal(
+                str(item.get("unit_cost", 0) or 0)
+            )
+        return items
+
+    def _decorate_supplier_option(
+        self,
+        option: dict[str, Any],
+        product_key: int,
+        suppliers: dict[int, dict[str, Any]],
+        products: dict[tuple[int, int], dict[str, Any]],
+    ) -> dict[str, Any]:
+        result = dict(option)
+        supplier_key = result.get("supplier_key")
+        if supplier_key is None:
+            return result
+        supplier_key = int(supplier_key)
+        supplier_policy = suppliers.get(supplier_key)
+        product_policy = products.get((product_key, supplier_key))
+        result["is_preferred"] = bool(
+            result.get("is_preferred")
+            or (product_policy and product_policy.get("is_preferred"))
+        )
+        result["policy_source"] = (
+            "producto" if product_policy else "proveedor" if supplier_policy else "estandar"
+        )
+        result["minimum_order_quantity"] = (
+            product_policy.get("minimum_order_quantity") if product_policy else None
+        )
+        result["pack_size"] = product_policy.get("pack_size") if product_policy else Decimal("1")
+        result["lead_time_days"] = (
+            product_policy.get("lead_time_days")
+            if product_policy and product_policy.get("lead_time_days") is not None
+            else supplier_policy.get("default_lead_time_days")
+            if supplier_policy
+            else None
+        )
+        result["max_wait_days"] = (
+            product_policy.get("max_wait_days")
+            if product_policy and product_policy.get("max_wait_days") is not None
+            else supplier_policy.get("max_wait_days")
+            if supplier_policy
+            else None
+        )
+        result["minimum_order_amount"] = (
+            supplier_policy.get("minimum_order_amount") if supplier_policy else None
+        )
+        result["shipping_cost"] = supplier_policy.get("shipping_cost") if supplier_policy else 0
+        result["free_shipping_threshold"] = (
+            supplier_policy.get("free_shipping_threshold") if supplier_policy else None
+        )
+        line_share = Decimal(str(result.get("confidence_pct", 0) or 0))
+        recent = 25 if result.get("last_purchase_date") else 0
+        history = 15 if int(result.get("purchase_lines", 0) or 0) >= 3 else 0
+        modal = 15 if result.get("is_modal") else 0
+        result["supplier_score"] = min(Decimal("100"), line_share * Decimal("0.45") + recent + history + modal)
+        return result
+
+    def _supplier_purchase_plans(
+        self,
+        items: list[dict[str, Any]],
+        as_of: date,
+    ) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        for item in items:
+            quantity = Decimal(str(item.get("recommended_quantity", 0) or 0))
+            if quantity <= 0:
+                continue
+            supplier_key = item.get("supplier_key")
+            group_key = str(supplier_key) if supplier_key is not None else "unassigned"
+            group = grouped.setdefault(
+                group_key,
+                {
+                    "supplier_key": supplier_key,
+                    "supplier": item.get("preferred_supplier") or "Sin proveedor",
+                    "currency_code": item.get("currency_code") or "COP",
+                    "lines": 0,
+                    "units": Decimal("0"),
+                    "estimated_value": Decimal("0"),
+                    "critical_lines": 0,
+                    "high_lines": 0,
+                    "policy_configured": False,
+                    "minimum_order_amount": item.get("minimum_order_amount"),
+                    "shipping_cost": item.get("shipping_cost") or Decimal("0"),
+                    "free_shipping_threshold": item.get("free_shipping_threshold"),
+                    "max_wait_days": int(item.get("effective_max_wait_days") or 7),
+                    "supplier_score": Decimal("0"),
+                    "product_lines": [],
+                },
+            )
+            group["lines"] += 1
+            group["units"] += quantity
+            group["estimated_value"] += item["estimated_purchase_value"]
+            group["critical_lines"] += int(item.get("priority") == "critical")
+            group["high_lines"] += int(item.get("priority") == "high")
+            group["policy_configured"] = group["policy_configured"] or bool(
+                item.get("policy_configured")
+            )
+            group["supplier_score"] += Decimal(str(item.get("supplier_score", 0) or 0))
+            group["product_lines"].append(
+                {
+                    "product_key": item["product_key"],
+                    "name": item["name"],
+                    "reference": item.get("reference"),
+                    "family": item.get("family"),
+                    "quantity": quantity,
+                    "unit_cost": item.get("unit_cost"),
+                    "estimated_value": item["estimated_purchase_value"],
+                    "priority": item.get("priority"),
+                    "coverage_days": item.get("coverage_days"),
+                    "supplier_source": item.get("supplier_source"),
+                }
+            )
+        for group in grouped.values():
+            minimum = Decimal(str(group["minimum_order_amount"] or 0))
+            value = Decimal(str(group["estimated_value"] or 0))
+            critical = group["critical_lines"] > 0
+            if group["supplier_key"] is None:
+                decision = "review"
+                reason = "No hay un proveedor identificado con suficiente evidencia."
+            elif critical:
+                decision = "buy_now"
+                reason = "Hay productos agotados o criticos con demanda reciente."
+            elif minimum > 0 and value >= minimum:
+                decision = "buy_now"
+                reason = "El pedido alcanza el minimo del proveedor."
+            elif group["free_shipping_threshold"] and value >= Decimal(
+                str(group["free_shipping_threshold"])
+            ):
+                decision = "complete_order"
+                reason = "El pedido alcanza el umbral de envio gratis."
+            elif not group["policy_configured"]:
+                decision = "review"
+                reason = "Configura minimo, plazo y transporte para decidir con precision."
+            else:
+                decision = "accumulate"
+                reason = "Acumular hasta completar el minimo o la proxima ventana."
+            group["decision"] = decision
+            group["decision_reason"] = reason
+            group["amount_to_minimum"] = max(minimum - value, Decimal("0"))
+            group["next_review_date"] = as_of + timedelta(days=group["max_wait_days"])
+            group["estimated_total_with_shipping"] = value + Decimal(
+                str(group["shipping_cost"] or 0)
+            )
+            group["supplier_score"] = group["supplier_score"] / max(group["lines"], 1)
+        return sorted(
+            grouped.values(),
+            key=lambda group: (
+                {"buy_now": 0, "complete_order": 1, "review": 2, "accumulate": 3}[
+                    group["decision"]
+                ],
+                -float(group["estimated_value"]),
+            ),
+        )
+
+    def replenishment_policies(self, currency_code: str = "COP") -> dict[str, list[dict[str, Any]]]:
+        return {
+            "supplier_policies": self._rows(
+                """
+                WITH stats AS (
+                  SELECT supplier_key, count(DISTINCT product_key) AS products,
+                         sum(purchased_amount) AS historical_amount
+                  FROM supplier_product_stats
+                  WHERE tenant_id = :tenant_id AND currency_code = :currency_code
+                  GROUP BY supplier_key
+                )
+                SELECT stats.supplier_key, c.name AS supplier, :currency_code AS currency_code,
+                       stats.products, stats.historical_amount,
+                       p.minimum_order_amount, p.shipping_cost,
+                       p.free_shipping_threshold, p.default_lead_time_days,
+                       p.max_wait_days, p.priority, p.active, p.notes,
+                       CASE WHEN p.supplier_key IS NULL THEN false ELSE true END AS configured
+                FROM stats
+                JOIN dim_contact c ON c.key = stats.supplier_key
+                LEFT JOIN supplier_replenishment_policies p
+                  ON p.tenant_id = :tenant_id
+                 AND p.supplier_key = stats.supplier_key
+                 AND p.currency_code = :currency_code
+                WHERE c.tenant_id = :tenant_id AND c.is_deleted = false
+                ORDER BY c.name
+                LIMIT 500
+                """,
+                {"currency_code": currency_code},
+            ),
+            "product_policies": self._rows(
+                """
+                SELECT p.supplier_key, p.product_key, p.currency_code,
+                       c.name AS supplier, d.name AS product,
+                       p.minimum_order_quantity, p.pack_size,
+                       p.lead_time_days, p.max_wait_days,
+                       p.is_preferred, p.active, p.notes
+                FROM supplier_product_policies p
+                JOIN dim_contact c ON c.key = p.supplier_key
+                JOIN dim_product d ON d.key = p.product_key
+                WHERE p.tenant_id = :tenant_id
+                  AND c.tenant_id = :tenant_id
+                  AND d.tenant_id = :tenant_id
+                  AND p.currency_code = :currency_code
+                ORDER BY c.name, d.name
+                LIMIT 2000
+                """,
+                {"currency_code": currency_code},
+            ),
+        }
+
+    def update_supplier_replenishment_policy(
+        self,
+        *,
+        supplier_key: int,
+        currency_code: str,
+        minimum_order_amount: Decimal | None,
+        shipping_cost: Decimal,
+        free_shipping_threshold: Decimal | None,
+        default_lead_time_days: int,
+        max_wait_days: int,
+        priority: int,
+        active: bool,
+        notes: str | None,
+    ) -> dict[str, Any]:
+        exists = self._one(
+            "SELECT key FROM dim_contact WHERE tenant_id=:tenant_id "
+            "AND key=:supplier_key AND is_deleted=false",
+            {"supplier_key": supplier_key},
+        )
+        if exists is None:
+            raise LookupError("Supplier not found")
+        self._session.execute(
+            text(
+                """
+                INSERT INTO supplier_replenishment_policies
+                  (tenant_id, supplier_key, currency_code, minimum_order_amount,
+                   shipping_cost, free_shipping_threshold, default_lead_time_days,
+                   max_wait_days, priority, active, notes, updated_at)
+                VALUES
+                  (:tenant_id, :supplier_key, :currency_code, :minimum_order_amount,
+                   :shipping_cost, :free_shipping_threshold, :default_lead_time_days,
+                   :max_wait_days, :priority, :active, :notes, now())
+                ON CONFLICT (tenant_id, supplier_key, currency_code) DO UPDATE SET
+                  minimum_order_amount=EXCLUDED.minimum_order_amount,
+                  shipping_cost=EXCLUDED.shipping_cost,
+                  free_shipping_threshold=EXCLUDED.free_shipping_threshold,
+                  default_lead_time_days=EXCLUDED.default_lead_time_days,
+                  max_wait_days=EXCLUDED.max_wait_days,
+                  priority=EXCLUDED.priority,
+                  active=EXCLUDED.active,
+                  notes=EXCLUDED.notes,
+                  updated_at=now()
+                """
+            ),
+            {
+                "tenant_id": self._tenant_id,
+                "supplier_key": supplier_key,
+                "currency_code": currency_code.upper(),
+                "minimum_order_amount": minimum_order_amount,
+                "shipping_cost": shipping_cost,
+                "free_shipping_threshold": free_shipping_threshold,
+                "default_lead_time_days": default_lead_time_days,
+                "max_wait_days": max_wait_days,
+                "priority": priority,
+                "active": active,
+                "notes": notes,
+            },
+        )
+        self._session.commit()
+        return {"supplier_key": supplier_key, "currency_code": currency_code.upper()}
+
+    def update_supplier_product_policy(
+        self,
+        *,
+        supplier_key: int,
+        product_key: int,
+        currency_code: str,
+        minimum_order_quantity: Decimal | None,
+        pack_size: Decimal,
+        lead_time_days: int | None,
+        max_wait_days: int | None,
+        is_preferred: bool,
+        active: bool,
+        notes: str | None,
+    ) -> dict[str, Any]:
+        supplier_exists = self._one(
+            "SELECT key FROM dim_contact WHERE tenant_id=:tenant_id "
+            "AND key=:supplier_key AND is_deleted=false",
+            {"supplier_key": supplier_key},
+        )
+        product_exists = self._one(
+            "SELECT key FROM dim_product WHERE tenant_id=:tenant_id "
+            "AND key=:product_key AND is_deleted=false",
+            {"product_key": product_key},
+        )
+        if supplier_exists is None or product_exists is None:
+            raise LookupError("Supplier or product not found")
+        currency = currency_code.upper()
+        if is_preferred:
+            self._session.execute(
+                text(
+                    """
+                    UPDATE supplier_product_policies
+                    SET is_preferred=false, updated_at=now()
+                    WHERE tenant_id=:tenant_id AND product_key=:product_key
+                      AND currency_code=:currency_code AND supplier_key<>:supplier_key
+                    """
+                ),
+                {
+                    "tenant_id": self._tenant_id,
+                    "product_key": product_key,
+                    "currency_code": currency,
+                    "supplier_key": supplier_key,
+                },
+            )
+        self._session.execute(
+            text(
+                """
+                INSERT INTO supplier_product_policies
+                  (tenant_id, supplier_key, product_key, currency_code,
+                   minimum_order_quantity, pack_size, lead_time_days, max_wait_days,
+                   is_preferred, active, notes, updated_at)
+                VALUES
+                  (:tenant_id, :supplier_key, :product_key, :currency_code,
+                   :minimum_order_quantity, :pack_size, :lead_time_days, :max_wait_days,
+                   :is_preferred, :active, :notes, now())
+                ON CONFLICT (tenant_id, supplier_key, product_key, currency_code) DO UPDATE SET
+                  minimum_order_quantity=EXCLUDED.minimum_order_quantity,
+                  pack_size=EXCLUDED.pack_size,
+                  lead_time_days=EXCLUDED.lead_time_days,
+                  max_wait_days=EXCLUDED.max_wait_days,
+                  is_preferred=EXCLUDED.is_preferred,
+                  active=EXCLUDED.active,
+                  notes=EXCLUDED.notes,
+                  updated_at=now()
+                """
+            ),
+            {
+                "tenant_id": self._tenant_id,
+                "supplier_key": supplier_key,
+                "product_key": product_key,
+                "currency_code": currency,
+                "minimum_order_quantity": minimum_order_quantity,
+                "pack_size": pack_size,
+                "lead_time_days": lead_time_days,
+                "max_wait_days": max_wait_days,
+                "is_preferred": is_preferred,
+                "active": active,
+                "notes": notes,
+            },
+        )
+        self._session.commit()
+        return {
+            "supplier_key": supplier_key,
+            "product_key": product_key,
+            "currency_code": currency,
         }
 
     def _replenishment_opportunities(

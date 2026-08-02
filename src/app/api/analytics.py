@@ -3,6 +3,7 @@
 import csv
 import io
 from datetime import date
+from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -144,6 +145,30 @@ class ReplenishmentActionPayload(BaseModel):
     snoozed_until: date | None = None
 
 
+class SupplierPolicyPayload(BaseModel):
+    currency_code: str = Field(default="COP", min_length=3, max_length=10)
+    minimum_order_amount: Decimal | None = Field(default=None, ge=0)
+    shipping_cost: Decimal = Field(default=Decimal("0"), ge=0)
+    free_shipping_threshold: Decimal | None = Field(default=None, ge=0)
+    default_lead_time_days: int = Field(default=7, ge=0, le=90)
+    max_wait_days: int = Field(default=7, ge=0, le=90)
+    priority: int = Field(default=100, ge=0, le=1000)
+    active: bool = True
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class SupplierProductPolicyPayload(BaseModel):
+    supplier_key: int = Field(ge=1)
+    currency_code: str = Field(default="COP", min_length=3, max_length=10)
+    minimum_order_quantity: Decimal | None = Field(default=None, ge=0)
+    pack_size: Decimal = Field(default=Decimal("1"), gt=0)
+    lead_time_days: int | None = Field(default=None, ge=0, le=90)
+    max_wait_days: int | None = Field(default=None, ge=0, le=90)
+    is_preferred: bool = False
+    active: bool = True
+    notes: str | None = Field(default=None, max_length=2000)
+
+
 @router.get("/purchase-recommendations")
 def get_purchase_recommendations(
     filters: Annotated[AnalyticsFilters, Depends(build_filters)],
@@ -183,9 +208,16 @@ def export_purchase_recommendations(
     )
     output = io.StringIO()
     writer = csv.writer(output)
+    order_by_supplier = {
+        str(order.get("supplier_key")): order for order in result.get("supplier_orders", [])
+    }
     writer.writerow(
         [
             "proveedor",
+            "decision_pedido",
+            "motivo_decision",
+            "minimo_proveedor",
+            "faltante_para_minimo",
             "fuente_proveedor",
             "prioridad",
             "estado",
@@ -208,9 +240,14 @@ def export_purchase_recommendations(
         ]
     )
     for item in result["items"]:
+        order = order_by_supplier.get(str(item.get("supplier_key")), {})
         writer.writerow(
             [
                 item.get("preferred_supplier") or "Sin proveedor",
+                order.get("decision"),
+                order.get("decision_reason"),
+                order.get("minimum_order_amount"),
+                order.get("amount_to_minimum"),
                 item.get("supplier_source"),
                 item.get("priority"),
                 item.get("review_status"),
@@ -242,6 +279,60 @@ def export_purchase_recommendations(
             "Content-Disposition": 'attachment; filename="reponer.csv"',
         },
     )
+
+
+@router.get("/purchase-recommendations/policies")
+def get_replenishment_policies(
+    service: Annotated[AnalyticsQueryService, Depends(query_service)],
+    currency: Annotated[str, Query(min_length=3, max_length=10)] = "COP",
+) -> dict:
+    return service.replenishment_policies(currency.upper())
+
+
+@router.put("/purchase-recommendations/policies/suppliers/{supplier_key}")
+def update_supplier_replenishment_policy(
+    supplier_key: int,
+    payload: SupplierPolicyPayload,
+    service: Annotated[AnalyticsQueryService, Depends(query_service)],
+) -> dict:
+    try:
+        return service.update_supplier_replenishment_policy(
+            supplier_key=supplier_key,
+            currency_code=payload.currency_code,
+            minimum_order_amount=payload.minimum_order_amount,
+            shipping_cost=payload.shipping_cost,
+            free_shipping_threshold=payload.free_shipping_threshold,
+            default_lead_time_days=payload.default_lead_time_days,
+            max_wait_days=payload.max_wait_days,
+            priority=payload.priority,
+            active=payload.active,
+            notes=payload.notes,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.put("/purchase-recommendations/policies/products/{product_key}")
+def update_supplier_product_policy(
+    product_key: int,
+    payload: SupplierProductPolicyPayload,
+    service: Annotated[AnalyticsQueryService, Depends(query_service)],
+) -> dict:
+    try:
+        return service.update_supplier_product_policy(
+            supplier_key=payload.supplier_key,
+            product_key=product_key,
+            currency_code=payload.currency_code,
+            minimum_order_quantity=payload.minimum_order_quantity,
+            pack_size=payload.pack_size,
+            lead_time_days=payload.lead_time_days,
+            max_wait_days=payload.max_wait_days,
+            is_preferred=payload.is_preferred,
+            active=payload.active,
+            notes=payload.notes,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @router.patch("/purchase-recommendations/{product_key}")

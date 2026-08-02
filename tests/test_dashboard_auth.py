@@ -57,6 +57,11 @@ def test_replenishment_exports_and_actions_require_a_dashboard_session(monkeypat
     monkeypatch.setattr(dashboard, "get_settings", lambda: settings)
     with TestClient(create_app()) as client:
         assert client.get("/api/v1/analytics/purchase-recommendations/export").status_code == 401
+        assert client.get("/api/v1/analytics/purchase-recommendations/policies").status_code == 401
+        assert client.put(
+            "/api/v1/analytics/purchase-recommendations/policies/suppliers/1",
+            json={"minimum_order_amount": 1000000},
+        ).status_code == 401
         assert client.patch(
             "/api/v1/analytics/purchase-recommendations/1",
             json={"status": "reviewed"},

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from app.cli import build_parser
 from app.services.analytics_mart import _DERIVED, _DIMENSIONS, _FACTS
 
@@ -51,6 +53,20 @@ def test_mart_queries_include_credit_notes_and_balanced_transfer_movements() -> 
     assert "row_number()" in derived
     assert "supplier_product_stats" in derived
     assert "frequency_rank" in derived
+
+
+def test_replenishment_policies_have_tenant_scoped_tables() -> None:
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / "migrations"
+        / "versions"
+        / "20260802_13_supplier_purchase_policies.py"
+    )
+    migration = migration_path.read_text()
+
+    assert "supplier_replenishment_policies" in migration
+    assert "supplier_product_policies" in migration
+    assert "pk_supplier_replenishment_policies" in migration
 
 
 def test_mart_dimensions_are_loaded_from_operational_tables() -> None:

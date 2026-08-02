@@ -95,3 +95,22 @@ pendiente, revisada, pospuesta, comprada o descartada, guardar una nota y
 conservar ese estado entre refrescos del mart. El endpoint de exportación
 genera un CSV agrupable por proveedor para preparar la compra manualmente; no
 crea órdenes automáticamente en Alegra.
+
+## Pedidos completos por proveedor
+
+La reposicion ahora tambien agrupa las lineas en canastas de compra por proveedor.
+Cada canasta clasifica la accion como:
+
+- buy_now: existe una linea critica o el pedido alcanza el minimo.
+- complete_order: se alcanza el umbral de envio gratis.
+- accumulate: hay proveedor identificado, pero conviene acumular.
+- review: falta proveedor o faltan politicas comerciales.
+
+Las tablas supplier_replenishment_policies y supplier_product_policies permiten
+configurar minimo de pedido, flete, envio gratis, plazo, dias maximos de espera,
+MOQ y multiplo de empaque. El dashboard permite editar las politicas del proveedor
+y marcar un proveedor alternativo como preferido para un producto.
+
+La recomendacion de proveedor es preliminar mientras no se registren pedidos y
+recepciones reales. La siguiente mejora sera capturar fecha prometida, fecha
+recibida, faltantes y variacion de costo para medir cumplimiento del proveedor.

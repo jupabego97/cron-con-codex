@@ -20,6 +20,16 @@ type SupplierOption = {
   supplier_key?: number | null;
   supplier?: string | null;
   is_modal?: boolean;
+  is_preferred?: boolean;
+  supplier_score?: number | null;
+  policy_source?: string | null;
+  minimum_order_quantity?: number | null;
+  pack_size?: number | null;
+  lead_time_days?: number | null;
+  max_wait_days?: number | null;
+  minimum_order_amount?: number | null;
+  shipping_cost?: number | null;
+  free_shipping_threshold?: number | null;
   confidence_pct?: number | null;
   unit_share_pct?: number | null;
   purchase_lines?: number | null;
@@ -46,6 +56,7 @@ type ReplenishmentParams = {
   target_coverage_days: number;
   lead_time_days: number;
   safety_days: number;
+  limit: number;
 };
 
 const tabs: Array<[Tab, string]> = [
@@ -86,6 +97,7 @@ export default function App() {
     target_coverage_days: 30,
     lead_time_days: 7,
     safety_days: 7,
+    limit: 500,
   });
 
   useEffect(() => {
@@ -309,12 +321,16 @@ function PurchaseRecommendations({ data, filters, replenishmentParams, setReplen
   const rows = (data.items || []) as RecommendationRow[];
   const excessItems = (data.excess_items || []) as RecommendationRow[];
   const slowItems = (data.slow_items || []) as RecommendationRow[];
+  const supplierOrders = (data.supplier_orders || []) as Array<Record<string, unknown>>;
+  const supplierPolicies = (data.supplier_policies || []) as Row[];
   const parameters = (data.parameters || {}) as Row;
   const [statusFilter, setStatusFilter] = useState("all");
   const [localStatuses, setLocalStatuses] = useState<Record<string, string>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [savingProduct, setSavingProduct] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [policyEdits, setPolicyEdits] = useState<Record<string, Record<string, string>>>({});
+  const [policySaving, setPolicySaving] = useState<string | null>(null);
 
   useEffect(() => {
     const nextStatuses: Record<string, string> = {};
@@ -364,6 +380,57 @@ function PurchaseRecommendations({ data, filters, replenishmentParams, setReplen
     }
   }
 
+  async function savePreferredSupplier(row: RecommendationRow, option: SupplierOption) {
+    if (!option.supplier_key) return;
+    setActionError(null);
+    try {
+      await api("/analytics/purchase-recommendations/policies/products/" + row.product_key, {
+        method: "PUT",
+        body: JSON.stringify({
+          supplier_key: option.supplier_key,
+          currency_code: String(row.currency_code || filters.currency || "COP"),
+          minimum_order_quantity: option.minimum_order_quantity ?? null,
+          pack_size: option.pack_size || 1,
+          lead_time_days: option.lead_time_days ?? null,
+          max_wait_days: option.max_wait_days ?? null,
+          is_preferred: true,
+          active: true,
+        }),
+      });
+      setActionError("Proveedor preferido guardado. Actualiza los datos para recalcular la canasta.");
+    } catch (requestError) {
+      setActionError(requestError instanceof Error ? requestError.message : "No fue posible guardar el proveedor.");
+    }
+  }
+
+  async function saveSupplierPolicy(row: Row, values: Record<string, string>) {
+    const key = String(row.supplier_key);
+    setPolicySaving(key);
+    setActionError(null);
+    const optionalNumber = (value: string) => value.trim() === "" ? null : Number(value);
+    try {
+      await api("/analytics/purchase-recommendations/policies/suppliers/" + row.supplier_key, {
+        method: "PUT",
+        body: JSON.stringify({
+          currency_code: String(row.currency_code || filters.currency || "COP"),
+          minimum_order_amount: optionalNumber(values.minimum_order_amount || ""),
+          shipping_cost: Number(values.shipping_cost || 0),
+          free_shipping_threshold: optionalNumber(values.free_shipping_threshold || ""),
+          default_lead_time_days: Number(values.default_lead_time_days || 7),
+          max_wait_days: Number(values.max_wait_days || 7),
+          priority: Number(values.priority || 100),
+          active: true,
+          notes: values.notes || null,
+        }),
+      });
+      setActionError("Politica del proveedor guardada. Actualiza los datos para recalcular el pedido.");
+    } catch (requestError) {
+      setActionError(requestError instanceof Error ? requestError.message : "No fue posible guardar la politica.");
+    } finally {
+      setPolicySaving(null);
+    }
+  }
+
   async function exportCsv() {
     setActionError(null);
     try {
@@ -397,18 +464,115 @@ function PurchaseRecommendations({ data, filters, replenishmentParams, setReplen
       <label>Plazo compra<input type="number" min="0" max="90" value={replenishmentParams.lead_time_days} onChange={(event) => setReplenishmentParams({ ...replenishmentParams, lead_time_days: Number(event.target.value) || 0 })} /></label>
       <label>Días seguridad<input type="number" min="0" max="90" value={replenishmentParams.safety_days} onChange={(event) => setReplenishmentParams({ ...replenishmentParams, safety_days: Number(event.target.value) || 0 })} /></label>
     </section>
+    <SupplierOrderPlan orders={supplierOrders} />
+    <SupplierPolicyTable
+      policies={supplierPolicies}
+      edits={policyEdits}
+      setEdits={setPolicyEdits}
+      onSave={saveSupplierPolicy}
+      saving={policySaving}
+    />
     {!visibleRows.length ? <div className="empty">No hay recomendaciones para este filtro.</div> : <>
       <section className="table-card"><h3>Plan agrupado por proveedor</h3><table><thead><tr><th>Proveedor</th><th>Productos</th><th>Unidades</th><th>Compra estimada</th><th>Críticos</th></tr></thead><tbody>{Object.entries(groups).sort(([, left], [, right]) => right.reduce((sum, row) => sum + Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), 0) - left.reduce((sum, row) => sum + Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), 0)).map(([supplier, supplierRows]) => <tr key={supplier}><td>{supplier}</td><td>{number(supplierRows.length)}</td><td>{number(supplierRows.reduce((sum, row) => sum + Number(row.recommended_quantity || 0), 0))}</td><td>{money(supplierRows.reduce((sum, row) => sum + Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), 0))}</td><td>{number(supplierRows.filter((row) => row.priority === "critical").length)}</td></tr>)}</tbody></table></section>
       <section className="table-card"><h3>Cola de reposición</h3><div className="table-scroll"><table><thead><tr><th>Estado</th><th>Prioridad</th><th>Producto</th><th>Proveedor</th><th>Stock</th><th>Velocidad 7/30/90</th><th>Cobertura</th><th>Comprar</th><th>Costo</th><th>Valor</th><th>Confianza</th><th>Motivo</th><th>Revisión</th></tr></thead><tbody>{visibleRows.map((row, index) => {
         const key = String(row.product_key || index);
         const options = row.supplier_options || [];
         const status = currentStatus(row);
-        return <tr key={key}><td><select value={status} disabled={savingProduct === key} onChange={(event) => saveAction(row, event.target.value)}><option value="pending">Pendiente</option><option value="reviewed">Revisado</option><option value="snoozed">Posponer 14 días</option><option value="purchased">Comprado</option><option value="discarded">Descartado</option></select></td><td>{String(row.priority)}</td><td>{String(row.name)}{row.reference ? " · " + String(row.reference) : ""}<small className="table-subtitle">{String(row.family)}</small></td><td>{String(row.preferred_supplier || "Sin proveedor")}<small className="table-subtitle">{String(row.supplier_source || "")}</small>{options.length > 0 && <details><summary>{options.length} opciones</summary><div className="supplier-options">{options.map((option, optionIndex) => <div key={String(option.supplier_key || optionIndex)}>{String(option.supplier || "Sin proveedor")} · {money(option.average_unit_cost)} · {number(option.confidence_pct)}% frecuencia · {String(option.last_purchase_date || "sin fecha")}</div>)}</div></details>}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.units_7d)} / {number(row.units_30d)} / {number(row.units_90d)}</td><td>{row.coverage_days == null ? "Agotado" : number(row.coverage_days) + " días"}</td><td>{number(row.recommended_quantity)}</td><td>{money(row.unit_cost, String(row.currency_code || "COP"))}</td><td>{money(Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), String(row.currency_code || "COP"))}</td><td>{number(row.supplier_confidence_pct)}%</td><td>{String(row.reason)}</td><td><input className="inline-note" value={notes[key] || ""} placeholder="Nota" onChange={(event) => setNotes((current) => ({ ...current, [key]: event.target.value }))} onBlur={() => saveAction(row, status)} /></td></tr>;
+        return <tr key={key}><td><select value={status} disabled={savingProduct === key} onChange={(event) => saveAction(row, event.target.value)}><option value="pending">Pendiente</option><option value="reviewed">Revisado</option><option value="snoozed">Posponer 14 días</option><option value="purchased">Comprado</option><option value="discarded">Descartado</option></select></td><td>{String(row.priority)}</td><td>{String(row.name)}{row.reference ? " · " + String(row.reference) : ""}<small className="table-subtitle">{String(row.family)}</small></td><td>{String(row.preferred_supplier || "Sin proveedor")}<small className="table-subtitle">{String(row.supplier_source || "")}</small>{options.length > 0 && <details><summary>{options.length} opciones</summary><div className="supplier-options">{options.map((option, optionIndex) => <div className="supplier-option-row" key={String(option.supplier_key || optionIndex)}><span>{String(option.supplier || "Sin proveedor")} · {money(option.average_unit_cost)} · {number(option.confidence_pct)}% frecuencia · {String(option.last_purchase_date || "sin fecha")}</span>{option.supplier_key && <button className="text-button compact-button" onClick={() => savePreferredSupplier(row, option)}>Usar</button>}</div>)}</div></details>}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.units_7d)} / {number(row.units_30d)} / {number(row.units_90d)}</td><td>{row.coverage_days == null ? "Agotado" : number(row.coverage_days) + " días"}</td><td>{number(row.recommended_quantity)}</td><td>{money(row.unit_cost, String(row.currency_code || "COP"))}</td><td>{money(Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), String(row.currency_code || "COP"))}</td><td>{number(row.supplier_confidence_pct)}%</td><td>{String(row.reason)}</td><td><input className="inline-note" value={notes[key] || ""} placeholder="Nota" onChange={(event) => setNotes((current) => ({ ...current, [key]: event.target.value }))} onBlur={() => saveAction(row, status)} /></td></tr>;
       })}</tbody></table></div></section>
     </>}
     <ReplenishmentOpportunityTable title="Exceso de cobertura (120 días o más)" rows={excessItems} coverage />
     <ReplenishmentOpportunityTable title="Inventario sin demanda en 90 días" rows={slowItems} />
   </>;
+}
+
+function SupplierOrderPlan({ orders }: { orders: Array<Record<string, unknown>> }) {
+  const decisionLabels: Record<string, string> = {
+    buy_now: "Comprar ahora",
+    complete_order: "Completar pedido",
+    accumulate: "Acumular",
+    review: "Revisar",
+  };
+  if (!orders.length) {
+    return <section className="table-card"><h3>Pedidos por proveedor</h3><p className="muted">No hay canastas de compra para estos filtros.</p></section>;
+  }
+  return <section className="table-card">
+    <h3>Pedidos por proveedor</h3>
+    <p className="muted">La decision combina urgencia, minimo de compra, flete, envio gratis y politicas configuradas.</p>
+    <div className="table-scroll"><table><thead><tr><th>Decision</th><th>Proveedor</th><th>Lineas</th><th>Unidades</th><th>Valor</th><th>Minimo</th><th>Falta</th><th>Criticos</th><th>Proxima revision</th><th>Politica</th></tr></thead><tbody>
+      {orders.map((order, index) => {
+        const lines = (order.product_lines || []) as Array<Record<string, unknown>>;
+        const decision = String(order.decision || "review");
+        return <tr key={String(order.supplier_key || index)}>
+          <td><strong className={"decision-" + decision}>{decisionLabels[decision] || decision}</strong><small className="table-subtitle">{String(order.decision_reason || "")}</small></td>
+          <td>{String(order.supplier || "Sin proveedor")}</td>
+          <td>{number(Number(order.lines || 0))}</td>
+          <td>{number(Number(order.units || 0))}</td>
+          <td>{money(Number(order.estimated_value || 0), String(order.currency_code || "COP"))}</td>
+          <td>{Number(order.minimum_order_amount || 0) ? money(Number(order.minimum_order_amount), String(order.currency_code || "COP")) : "No definido"}</td>
+          <td>{money(Number(order.amount_to_minimum || 0), String(order.currency_code || "COP"))}</td>
+          <td>{number(Number(order.critical_lines || 0))}</td>
+          <td>{String(order.next_review_date || "")}</td>
+          <td>{order.policy_configured ? "Configurada" : "Pendiente"}</td>
+          <td><details><summary>Ver lineas</summary><div className="supplier-options">{lines.map((line, lineIndex) => <div key={String(line.product_key || lineIndex)}>{String(line.name)} ? {number(Number(line.quantity || 0))} ? {money(Number(line.estimated_value || 0), String(order.currency_code || "COP"))}</div>)}</div></details></td>
+        </tr>;
+      })}
+    </tbody></table></div>
+  </section>;
+}
+
+type PolicyEditValues = Record<string, string>;
+
+function SupplierPolicyTable({
+  policies,
+  edits,
+  setEdits,
+  onSave,
+  saving,
+}: {
+  policies: Row[];
+  edits: Record<string, PolicyEditValues>;
+  setEdits: (updater: (current: Record<string, PolicyEditValues>) => Record<string, PolicyEditValues>) => void;
+  onSave: (row: Row, values: PolicyEditValues) => void;
+  saving: string | null;
+}) {
+  if (!policies.length) return <section className="table-card"><h3>Politicas de proveedores</h3><p className="muted">No hay proveedores con compras historicas para configurar.</p></section>;
+  const field = (row: Row, key: string) => {
+    const id = String(row.supplier_key);
+    return edits[id]?.[key] ?? String(row[key] ?? "");
+  };
+  const update = (row: Row, key: string, value: string) => {
+    const id = String(row.supplier_key);
+    setEdits((current) => ({ ...current, [id]: { ...(current[id] || {}), [key]: value } }));
+  };
+  const values = (row: Row): PolicyEditValues => ({
+    minimum_order_amount: field(row, "minimum_order_amount"),
+    shipping_cost: field(row, "shipping_cost"),
+    free_shipping_threshold: field(row, "free_shipping_threshold"),
+    default_lead_time_days: field(row, "default_lead_time_days") || "7",
+    max_wait_days: field(row, "max_wait_days") || "7",
+    priority: field(row, "priority") || "100",
+    notes: field(row, "notes"),
+  });
+  return <section className="table-card">
+    <h3>Politicas de proveedores</h3>
+    <p className="muted">Configura minimo, transporte y plazo. Esto permite decidir cuando consolidar una compra completa.</p>
+    <div className="table-scroll"><table><thead><tr><th>Proveedor</th><th>Productos</th><th>Minimo pedido</th><th>Flete</th><th>Envio gratis desde</th><th>Plazo dias</th><th>Esperar dias</th><th>Accion</th></tr></thead><tbody>
+      {policies.map((row) => {
+        const id = String(row.supplier_key);
+        return <tr key={id}>
+          <td>{String(row.supplier || "Sin proveedor")}<small className="table-subtitle">{row.configured ? "Configurada" : "Sin configurar"}</small></td>
+          <td>{number(Number(row.products || 0))}</td>
+          <td><input className="policy-input" type="number" min="0" value={field(row, "minimum_order_amount")} onChange={(event) => update(row, "minimum_order_amount", event.target.value)} placeholder="0" /></td>
+          <td><input className="policy-input" type="number" min="0" value={field(row, "shipping_cost")} onChange={(event) => update(row, "shipping_cost", event.target.value)} placeholder="0" /></td>
+          <td><input className="policy-input" type="number" min="0" value={field(row, "free_shipping_threshold")} onChange={(event) => update(row, "free_shipping_threshold", event.target.value)} placeholder="Opcional" /></td>
+          <td><input className="policy-input small" type="number" min="0" max="90" value={field(row, "default_lead_time_days") || "7"} onChange={(event) => update(row, "default_lead_time_days", event.target.value)} /></td>
+          <td><input className="policy-input small" type="number" min="0" max="90" value={field(row, "max_wait_days") || "7"} onChange={(event) => update(row, "max_wait_days", event.target.value)} /></td>
+          <td><button className="primary-button compact-button" disabled={saving === id} onClick={() => onSave(row, values(row))}>{saving === id ? "Guardando" : "Guardar"}</button></td>
+        </tr>;
+      })}
+    </tbody></table></div>
+  </section>;
 }
 
 function ReplenishmentOpportunityTable({ title, rows, coverage = false }: { title: string; rows: RecommendationRow[]; coverage?: boolean }) {
