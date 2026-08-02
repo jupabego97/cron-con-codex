@@ -380,29 +380,6 @@ function PurchaseRecommendations({ data, filters, replenishmentParams, setReplen
     }
   }
 
-  async function savePreferredSupplier(row: RecommendationRow, option: SupplierOption) {
-    if (!option.supplier_key) return;
-    setActionError(null);
-    try {
-      await api("/analytics/purchase-recommendations/policies/products/" + row.product_key, {
-        method: "PUT",
-        body: JSON.stringify({
-          supplier_key: option.supplier_key,
-          currency_code: String(row.currency_code || filters.currency || "COP"),
-          minimum_order_quantity: option.minimum_order_quantity ?? null,
-          pack_size: option.pack_size || 1,
-          lead_time_days: option.lead_time_days ?? null,
-          max_wait_days: option.max_wait_days ?? null,
-          is_preferred: true,
-          active: true,
-        }),
-      });
-      setActionError("Proveedor preferido guardado. Actualiza los datos para recalcular la canasta.");
-    } catch (requestError) {
-      setActionError(requestError instanceof Error ? requestError.message : "No fue posible guardar el proveedor.");
-    }
-  }
-
   async function saveSupplierPolicy(row: Row, values: Record<string, string>) {
     const key = String(row.supplier_key);
     setPolicySaving(key);
@@ -478,12 +455,56 @@ function PurchaseRecommendations({ data, filters, replenishmentParams, setReplen
         const key = String(row.product_key || index);
         const options = row.supplier_options || [];
         const status = currentStatus(row);
-        return <tr key={key}><td><select value={status} disabled={savingProduct === key} onChange={(event) => saveAction(row, event.target.value)}><option value="pending">Pendiente</option><option value="reviewed">Revisado</option><option value="snoozed">Posponer 14 días</option><option value="purchased">Comprado</option><option value="discarded">Descartado</option></select></td><td>{String(row.priority)}</td><td>{String(row.name)}{row.reference ? " · " + String(row.reference) : ""}<small className="table-subtitle">{String(row.family)}</small></td><td>{String(row.preferred_supplier || "Sin proveedor")}<small className="table-subtitle">{String(row.supplier_source || "")}</small>{options.length > 0 && <details><summary>{options.length} opciones</summary><div className="supplier-options">{options.map((option, optionIndex) => <div className="supplier-option-row" key={String(option.supplier_key || optionIndex)}><span>{String(option.supplier || "Sin proveedor")} · {money(option.average_unit_cost)} · {number(option.confidence_pct)}% frecuencia · {String(option.last_purchase_date || "sin fecha")}</span>{option.supplier_key && <button className="text-button compact-button" onClick={() => savePreferredSupplier(row, option)}>Usar</button>}</div>)}</div></details>}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.units_7d)} / {number(row.units_30d)} / {number(row.units_90d)}</td><td>{row.coverage_days == null ? "Agotado" : number(row.coverage_days) + " días"}</td><td>{number(row.recommended_quantity)}</td><td>{money(row.unit_cost, String(row.currency_code || "COP"))}</td><td>{money(Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), String(row.currency_code || "COP"))}</td><td>{number(row.supplier_confidence_pct)}%</td><td>{String(row.reason)}</td><td><input className="inline-note" value={notes[key] || ""} placeholder="Nota" onChange={(event) => setNotes((current) => ({ ...current, [key]: event.target.value }))} onBlur={() => saveAction(row, status)} /></td></tr>;
+        return <tr key={key}><td><select value={status} disabled={savingProduct === key} onChange={(event) => saveAction(row, event.target.value)}><option value="pending">Pendiente</option><option value="reviewed">Revisado</option><option value="snoozed">Posponer 14 días</option><option value="purchased">Comprado</option><option value="discarded">Descartado</option></select></td><td>{String(row.priority)}</td><td>{String(row.name)}{row.reference ? " · " + String(row.reference) : ""}<small className="table-subtitle">{String(row.family)}</small></td><td>{String(row.preferred_supplier || "Sin proveedor")}<small className="table-subtitle">{String(row.supplier_source || "")}</small>{options.length > 0 && <details><summary>{options.length} opciones</summary><div className="supplier-options">{options.map((option, optionIndex) => <div className="supplier-option-row" key={String(option.supplier_key || optionIndex)}><span>{String(option.supplier || "Sin proveedor")} · {money(option.average_unit_cost)} · {number(option.confidence_pct)}% frecuencia · {String(option.last_purchase_date || "sin fecha")}</span>{option.supplier_key && <ProductPolicyEditor row={row} option={option} />}</div>)}</div></details>}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.units_7d)} / {number(row.units_30d)} / {number(row.units_90d)}</td><td>{row.coverage_days == null ? "Agotado" : number(row.coverage_days) + " días"}</td><td>{number(row.recommended_quantity)}</td><td>{money(row.unit_cost, String(row.currency_code || "COP"))}</td><td>{money(Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), String(row.currency_code || "COP"))}</td><td>{number(row.supplier_confidence_pct)}%</td><td>{String(row.reason)}</td><td><input className="inline-note" value={notes[key] || ""} placeholder="Nota" onChange={(event) => setNotes((current) => ({ ...current, [key]: event.target.value }))} onBlur={() => saveAction(row, status)} /></td></tr>;
       })}</tbody></table></div></section>
     </>}
     <ReplenishmentOpportunityTable title="Exceso de cobertura (120 días o más)" rows={excessItems} coverage />
     <ReplenishmentOpportunityTable title="Inventario sin demanda en 90 días" rows={slowItems} />
   </>;
+}
+
+function ProductPolicyEditor({ row, option }: { row: RecommendationRow; option: SupplierOption }) {
+  const [minimum, setMinimum] = useState(String(option.minimum_order_quantity ?? ""));
+  const [pack, setPack] = useState(String(option.pack_size || 1));
+  const [lead, setLead] = useState(String(option.lead_time_days ?? 7));
+  const [wait, setWait] = useState(String(option.max_wait_days ?? 7));
+  const [preferred, setPreferred] = useState(Boolean(option.is_preferred));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function save() {
+    if (!option.supplier_key) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api("/analytics/purchase-recommendations/policies/products/" + row.product_key, {
+        method: "PUT",
+        body: JSON.stringify({
+          supplier_key: option.supplier_key,
+          currency_code: String(row.currency_code || "COP"),
+          minimum_order_quantity: minimum.trim() === "" ? null : Number(minimum),
+          pack_size: Number(pack) || 1,
+          lead_time_days: Number(lead) || 0,
+          max_wait_days: Number(wait) || 0,
+          is_preferred: preferred,
+          active: true,
+        }),
+      });
+      setError("Guardado");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Error al guardar");
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <div className="product-policy-editor">
+    <label>MOQ<input className="policy-input small" type="number" min="0" value={minimum} onChange={(event) => setMinimum(event.target.value)} /></label>
+    <label>Empaque<input className="policy-input small" type="number" min="0.01" value={pack} onChange={(event) => setPack(event.target.value)} /></label>
+    <label>Plazo<input className="policy-input small" type="number" min="0" max="90" value={lead} onChange={(event) => setLead(event.target.value)} /></label>
+    <label>Espera<input className="policy-input small" type="number" min="0" max="90" value={wait} onChange={(event) => setWait(event.target.value)} /></label>
+    <label className="checkbox-label"><input type="checkbox" checked={preferred} onChange={(event) => setPreferred(event.target.checked)} /> Preferido</label>
+    <button className="text-button compact-button" disabled={saving} onClick={save}>{saving ? "Guardando" : "Guardar"}</button>
+    {error && <small className="table-subtitle">{error}</small>}
+  </div>;
 }
 
 function SupplierOrderPlan({ orders }: { orders: Array<Record<string, unknown>> }) {
@@ -499,7 +520,7 @@ function SupplierOrderPlan({ orders }: { orders: Array<Record<string, unknown>> 
   return <section className="table-card">
     <h3>Pedidos por proveedor</h3>
     <p className="muted">La decision combina urgencia, minimo de compra, flete, envio gratis y politicas configuradas.</p>
-    <div className="table-scroll"><table><thead><tr><th>Decision</th><th>Proveedor</th><th>Lineas</th><th>Unidades</th><th>Valor</th><th>Minimo</th><th>Falta</th><th>Criticos</th><th>Proxima revision</th><th>Politica</th></tr></thead><tbody>
+    <div className="table-scroll"><table><thead><tr><th>Decision</th><th>Proveedor</th><th>Lineas</th><th>Unidades</th><th>Valor</th><th>Minimo</th><th>Falta</th><th>Criticos</th><th>Proxima revision</th><th>Politica</th><th>Detalle</th></tr></thead><tbody>
       {orders.map((order, index) => {
         const lines = (order.product_lines || []) as Array<Record<string, unknown>>;
         const decision = String(order.decision || "review");

@@ -1149,6 +1149,19 @@ class AnalyticsQueryService:
                         if option.get("supplier_key") != preferred["supplier_key"]
                     ],
                 ][:3]
+            selected_option = next(
+                (
+                    option
+                    for option in item["supplier_options"]
+                    if option.get("supplier_key") == supplier_key
+                ),
+                None,
+            )
+            item["supplier_score"] = (
+                selected_option.get("supplier_score")
+                if selected_option is not None
+                else item.get("supplier_confidence_pct") or 0
+            )
             daily_velocity = Decimal(str(item.get("daily_velocity", 0) or 0))
             stock = Decimal(str(item.get("quantity_on_hand", 0) or 0))
             minimum = Decimal(str(item.get("minimum_order_quantity", 0) or 0))
