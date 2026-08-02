@@ -39,6 +39,19 @@ def test_item_projection_extracts_family_from_alegra_custom_fields() -> None:
     assert result["family_name"] == "GAMING"
 
 
+def test_item_projection_extracts_preferred_supplier_from_alegra_custom_fields() -> None:
+    result = _projection_fields(
+        "item",
+        {
+            "name": "Teclado gamer",
+            "customFields": [{"label": "PROVEEDOR", "value": "JALTECH"}],
+        },
+        "1",
+    )
+
+    assert result["preferred_supplier_name"] == "JALTECH"
+
+
 def test_document_line_projection_calculates_total_when_the_api_does_not_send_one() -> None:
     result = _line_value(
         tenant_id=uuid.uuid4(),

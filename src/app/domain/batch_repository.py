@@ -451,6 +451,7 @@ def _projection_fields(resource: str, payload: dict[str, Any], external_id: str)
             "base_price": _decimal(payload.get("price")),
             "cost": _decimal(payload.get("cost")),
             "family_name": _custom_field_value(payload, "FAMILIA"),
+            "preferred_supplier_name": _custom_field_value(payload, "PROVEEDOR"),
         }
     if resource == "warehouse":
         return {

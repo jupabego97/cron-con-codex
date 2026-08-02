@@ -126,6 +126,13 @@ class AnalyticsQueryService:
                 dimension_select="COALESCE(p.family_name, 'SIN FAMILIA') AS family",
                 group_by="COALESCE(p.family_name, 'SIN FAMILIA')",
             ),
+            "catalog_supplier_detail": self._sales_detail(
+                filters,
+                joins="LEFT JOIN dim_product p ON p.key = f.product_key",
+                dimension_select="COALESCE(NULLIF(p.preferred_supplier_name, ''), 'SIN PROVEEDOR') AS supplier",
+                group_by="COALESCE(NULLIF(p.preferred_supplier_name, ''), 'SIN PROVEEDOR')",
+            ),
+            "cost_supplier_detail": self._sales_cost_supplier_detail(filters),
             "product_detail": self._sales_detail(
                 filters,
                 joins="LEFT JOIN dim_product p ON p.key = f.product_key",
@@ -179,6 +186,7 @@ class AnalyticsQueryService:
                      count(*) AS total_lines,
                      count(*) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS costed_lines,
                      count(*) FILTER (WHERE f.cost_status = 'unavailable') AS unavailable_cost_lines,
+                     count(DISTINCT f.product_key) AS product_count,
                      max(d.calendar_date) AS last_sale_date
               FROM fact_sales_line f
               JOIN dim_date d ON d.date_key = f.date_key
@@ -193,6 +201,84 @@ class AnalyticsQueryService:
             FROM aggregated
             ORDER BY net_sales DESC
             LIMIT 200
+            """,
+            params,
+        )
+
+    def _sales_cost_supplier_detail(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """Attribute costed sales to the supplier that created each FIFO layer.
+
+        Revenue is allocated proportionally to each cost allocation so the
+        report can compare supplier-attributed sales with the corresponding
+        COGS. Opening balances, unavailable cost, and credit-note return layers
+        without a purchase-bill source remain explicitly unassigned.
+        """
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        return self._rows(
+            f"""
+            WITH latest_run AS (
+              SELECT id
+              FROM sales_cost_allocation_runs
+              WHERE tenant_id = :tenant_id AND status LIKE 'succeeded%'
+              ORDER BY finished_at DESC NULLS LAST, started_at DESC
+              LIMIT 1
+            ), allocated AS (
+              SELECT a.document_type, a.document_alegra_id, a.line_number,
+                     a.product_key, a.quantity_allocated, a.cost_amount,
+                     COALESCE(f.currency_code, 'COP') AS currency_code,
+                     f.net_sales_amount,
+                     COALESCE(c.name, 'Sin proveedor/costo de apertura') AS supplier,
+                     SUM(a.quantity_allocated) OVER (
+                       PARTITION BY a.document_type, a.document_alegra_id, a.line_number
+                     ) AS line_allocated_quantity
+              FROM sales_cost_allocations a
+              JOIN latest_run r ON r.id = a.run_id
+              JOIN fact_sales_line f
+                ON f.tenant_id = a.tenant_id
+               AND f.document_type = a.document_type
+               AND f.document_alegra_id = a.document_alegra_id
+               AND f.line_number = a.line_number
+               AND f.is_deleted = false
+              JOIN dim_date d ON d.date_key = f.date_key
+              LEFT JOIN inventory_cost_movements m ON m.id = a.source_movement_id
+              LEFT JOIN fact_purchase_line purchase_source
+                ON purchase_source.tenant_id = a.tenant_id
+               AND purchase_source.document_alegra_id = m.source_id
+               AND purchase_source.line_number = m.source_line_number
+               AND purchase_source.is_deleted = false
+              LEFT JOIN dim_contact c ON c.key = purchase_source.provider_key
+              WHERE {where}
+                AND a.tenant_id = :tenant_id
+                AND a.cost_amount IS NOT NULL
+                AND a.allocation_type <> 'unavailable'
+            ), aggregated AS (
+              SELECT supplier, currency_code,
+                     COALESCE(sum(
+                       net_sales_amount * quantity_allocated /
+                       NULLIF(line_allocated_quantity, 0)
+                     ), 0) AS attributed_net_sales,
+                     COALESCE(sum(cost_amount), 0) AS cogs,
+                     COALESCE(sum(quantity_allocated), 0) AS allocated_units,
+                     count(DISTINCT (document_type, document_alegra_id)) AS documents,
+                     count(DISTINCT product_key) AS products,
+                     count(*) AS allocation_rows
+              FROM allocated
+              GROUP BY supplier, currency_code
+            )
+            SELECT aggregated.*,
+                   attributed_net_sales - cogs AS gross_margin,
+                   COALESCE(
+                     (attributed_net_sales - cogs) /
+                     NULLIF(attributed_net_sales, 0) * 100, 0
+                   ) AS gross_margin_pct,
+                   COALESCE(
+                     attributed_net_sales /
+                     NULLIF(sum(attributed_net_sales) OVER (PARTITION BY currency_code), 0) * 100,
+                     0
+                   ) AS share_pct
+            FROM aggregated
+            ORDER BY attributed_net_sales DESC
+            LIMIT 100
             """,
             params,
         )

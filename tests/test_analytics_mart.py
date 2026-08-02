@@ -44,6 +44,7 @@ def test_mart_queries_include_credit_notes_and_balanced_transfer_movements() -> 
     assert "COALESCE(p.currency_code, :default_currency_code)" in statements
     dimensions = "\n".join(str(statement) for statement in _DIMENSIONS)
     assert "family_name" in dimensions
+    assert "preferred_supplier_name" in dimensions
 
 
 def test_mart_dimensions_are_loaded_from_operational_tables() -> None:

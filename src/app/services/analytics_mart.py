@@ -82,10 +82,12 @@ _DIMENSIONS = (
         """
         INSERT INTO dim_product
             (tenant_id, alegra_id, source_hash, is_deleted, name, reference, item_type,
-             status, inventory_enabled, unit, base_price, current_cost, family_name, updated_at)
+             status, inventory_enabled, unit, base_price, current_cost, family_name,
+             preferred_supplier_name, updated_at)
         SELECT tenant_id, alegra_id, source_hash, is_deleted, name, reference, item_type,
                status, inventory_enabled, unit, base_price, cost,
-               COALESCE(NULLIF(family_name, ''), 'SIN FAMILIA'), now()
+               COALESCE(NULLIF(family_name, ''), 'SIN FAMILIA'),
+               NULLIF(preferred_supplier_name, ''), now()
         FROM catalog_items WHERE tenant_id = :tenant_id
         ON CONFLICT (tenant_id, alegra_id) DO UPDATE SET
           source_hash = EXCLUDED.source_hash, is_deleted = EXCLUDED.is_deleted,
@@ -93,7 +95,7 @@ _DIMENSIONS = (
           status = EXCLUDED.status, inventory_enabled = EXCLUDED.inventory_enabled,
           unit = EXCLUDED.unit, base_price = EXCLUDED.base_price,
           current_cost = EXCLUDED.current_cost, family_name = EXCLUDED.family_name,
-          updated_at = now()
+          preferred_supplier_name = EXCLUDED.preferred_supplier_name, updated_at = now()
         """
     ),
     text(
