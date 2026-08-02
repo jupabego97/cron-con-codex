@@ -97,6 +97,17 @@ class HistoricalSalesCostService:
                 cogs_amount=Decimal("0"),
             )
 
+        self._session.execute(
+            text(
+                """
+                UPDATE sales_cost_allocation_runs
+                SET status='failed', error_message='Superseded by a new allocation run',
+                    finished_at=COALESCE(finished_at, now())
+                WHERE tenant_id=:tenant_id AND status='running'
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
         run_id = uuid.uuid4()
         self._session.execute(
             text(
@@ -256,56 +267,41 @@ class HistoricalSalesCostService:
         cutoff_date: date,
         warehouse_key: int,
     ) -> None:
-        rows = self._session.execute(
-            text(
-                """
-                SELECT p.product_key, d.calendar_date AS occurred_on,
-                       p.document_alegra_id, p.document_number, p.line_number,
-                       p.quantity, p.unit_cost, p.purchase_amount, p.currency_code
-                FROM fact_purchase_line p
-                JOIN dim_date d ON d.date_key=p.date_key
-                WHERE p.tenant_id=:tenant_id AND p.is_deleted=false
-                  AND p.product_key IS NOT NULL AND p.quantity>0
-                  AND p.unit_cost IS NOT NULL AND d.calendar_date>=:cutoff_date
-                ORDER BY d.calendar_date, p.document_alegra_id, p.line_number
-                """
-            ),
-            {"tenant_id": tenant_id, "cutoff_date": cutoff_date},
-        ).mappings()
+        rows = list(
+            self._session.execute(
+                text(
+                    """
+                    SELECT p.product_key, d.calendar_date AS occurred_on,
+                           p.document_alegra_id, p.document_number, p.line_number,
+                           p.quantity, p.unit_cost, p.currency_code
+                    FROM fact_purchase_line p
+                    JOIN dim_date d ON d.date_key=p.date_key
+                    WHERE p.tenant_id=:tenant_id AND p.is_deleted=false
+                      AND p.product_key IS NOT NULL AND p.quantity>0
+                      AND p.unit_cost IS NOT NULL AND d.calendar_date>=:cutoff_date
+                    ORDER BY d.calendar_date, p.document_alegra_id, p.line_number
+                    """
+                ),
+                {"tenant_id": tenant_id, "cutoff_date": cutoff_date},
+            ).mappings()
+        )
+        if not rows:
+            return
+
+        purchase_rows = []
         for row in rows:
             quantity = Decimal(row["quantity"])
             unit_cost = Decimal(row["unit_cost"])
-            movement_id = self._session.execute(
-                text(
-                    """
-                    INSERT INTO inventory_cost_movements
-                      (id, tenant_id, product_key, warehouse_key, occurred_on,
-                       movement_type, source_type, source_id, source_line_number,
-                       quantity_in, quantity_out, unit_cost, total_cost, cost_method,
-                       confidence, metadata)
-                    VALUES
-                      (:id, :tenant_id, :product_key, :warehouse_key, :occurred_on,
-                       'purchase_receipt', 'purchase_bill', :source_id, :source_line_number,
-                       :quantity_in, 0, :unit_cost, :total_cost, 'source', 'source',
-                       CAST(:metadata AS jsonb))
-                    ON CONFLICT (tenant_id, source_type, source_id, source_line_number)
-                    DO UPDATE SET quantity_in=EXCLUDED.quantity_in,
-                                  unit_cost=EXCLUDED.unit_cost,
-                                  total_cost=EXCLUDED.total_cost,
-                                  occurred_on=EXCLUDED.occurred_on,
-                                  metadata=EXCLUDED.metadata
-                    RETURNING id
-                    """
-                ),
+            purchase_rows.append(
                 {
-                    "id": uuid.uuid4(),
+                    "movement_id": uuid.uuid4(),
                     "tenant_id": tenant_id,
                     "product_key": int(row["product_key"]),
                     "warehouse_key": warehouse_key,
                     "occurred_on": row["occurred_on"],
                     "source_id": str(row["document_alegra_id"]),
                     "source_line_number": int(row["line_number"]),
-                    "quantity_in": quantity,
+                    "quantity": quantity,
                     "unit_cost": unit_cost,
                     "total_cost": quantity * unit_cost,
                     "metadata": json.dumps(
@@ -314,36 +310,85 @@ class HistoricalSalesCostService:
                             "currency_code": row["currency_code"],
                         }
                     ),
-                },
-            ).scalar_one()
-            self._session.execute(
-                text(
-                    """
-                    INSERT INTO inventory_cost_layers
-                      (id, tenant_id, product_key, warehouse_key, movement_id, opened_on,
-                       original_quantity, remaining_quantity, unit_cost, layer_status)
-                    VALUES
-                      (:id, :tenant_id, :product_key, :warehouse_key, :movement_id, :opened_on,
-                       :quantity, :quantity, :unit_cost, 'open')
-                    ON CONFLICT (movement_id) DO UPDATE SET
-                      original_quantity=EXCLUDED.original_quantity,
-                      remaining_quantity=EXCLUDED.remaining_quantity,
-                      unit_cost=EXCLUDED.unit_cost,
-                      opened_on=EXCLUDED.opened_on,
-                      layer_status='open'
-                    """
-                ),
+                }
+            )
+
+        self._session.execute(
+            text(
+                """
+                INSERT INTO inventory_cost_movements
+                  (id, tenant_id, product_key, warehouse_key, occurred_on,
+                   movement_type, source_type, source_id, source_line_number,
+                   quantity_in, quantity_out, unit_cost, total_cost, cost_method,
+                   confidence, metadata)
+                VALUES
+                  (:movement_id, :tenant_id, :product_key, :warehouse_key, :occurred_on,
+                   'purchase_receipt', 'purchase_bill', :source_id, :source_line_number,
+                   :quantity, 0, :unit_cost, :total_cost, 'source', 'source',
+                   CAST(:metadata AS jsonb))
+                ON CONFLICT (tenant_id, source_type, source_id, source_line_number)
+                DO UPDATE SET product_key=EXCLUDED.product_key,
+                              warehouse_key=EXCLUDED.warehouse_key,
+                              quantity_in=EXCLUDED.quantity_in,
+                              unit_cost=EXCLUDED.unit_cost,
+                              total_cost=EXCLUDED.total_cost,
+                              occurred_on=EXCLUDED.occurred_on,
+                              metadata=EXCLUDED.metadata
+                """
+            ),
+            purchase_rows,
+        )
+        movement_rows = self._session.execute(
+            text(
+                """
+                SELECT id, source_id, source_line_number
+                FROM inventory_cost_movements
+                WHERE tenant_id=:tenant_id AND source_type='purchase_bill'
+                """
+            ),
+            {"tenant_id": tenant_id},
+        ).mappings()
+        movement_by_source = {
+            (str(row["source_id"]), int(row["source_line_number"])): row["id"]
+            for row in movement_rows
+        }
+        layer_rows = []
+        for row in purchase_rows:
+            movement_id = movement_by_source[
+                (row["source_id"], row["source_line_number"])
+            ]
+            layer_rows.append(
                 {
-                    "id": uuid.uuid4(),
+                    "layer_id": uuid.uuid4(),
                     "tenant_id": tenant_id,
-                    "product_key": int(row["product_key"]),
+                    "product_key": row["product_key"],
                     "warehouse_key": warehouse_key,
                     "movement_id": movement_id,
                     "opened_on": row["occurred_on"],
-                    "quantity": quantity,
-                    "unit_cost": unit_cost,
-                },
+                    "quantity": row["quantity"],
+                    "unit_cost": row["unit_cost"],
+                }
             )
+        self._session.execute(
+            text(
+                """
+                INSERT INTO inventory_cost_layers
+                  (id, tenant_id, product_key, warehouse_key, movement_id, opened_on,
+                   original_quantity, remaining_quantity, unit_cost, layer_status)
+                VALUES (:layer_id, :tenant_id, :product_key, :warehouse_key, :movement_id,
+                        :opened_on, :quantity, :quantity, :unit_cost, 'open')
+                ON CONFLICT (movement_id) DO UPDATE SET
+                  product_key=EXCLUDED.product_key,
+                  warehouse_key=EXCLUDED.warehouse_key,
+                  original_quantity=EXCLUDED.original_quantity,
+                  remaining_quantity=EXCLUDED.remaining_quantity,
+                  unit_cost=EXCLUDED.unit_cost,
+                  opened_on=EXCLUDED.opened_on,
+                  layer_status='open'
+                """
+            ),
+            layer_rows,
+        )
 
     def _load_layers(self, *, tenant_id: uuid.UUID) -> dict[int, list[_CostLayer]]:
         rows = self._session.execute(
