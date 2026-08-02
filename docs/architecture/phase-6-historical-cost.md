@@ -54,12 +54,18 @@ tenant y fecha de corte se rechaza para impedir dos saldos iniciales.
 
 ## Modelo y uso posterior
 
-`inventory_cost_movements` sera la entrada de movimientos de costo. La carga
-inicial usa `cost_method=moving_average` y `confidence=certified`. Las capas
-abiertas permiten implementar posteriormente consumo FIFO o costo promedio
-ponderado cuando existan compras, ventas y transferencias históricas con
-calidad suficiente. El dashboard no debe sumar esta capa como inventario
-actual: el saldo actual sigue viniendo de la captura de Alegra.
+`inventory_cost_movements` es la entrada del ledger de costo. La carga
+inicial conserva `confidence=certified`; las compras posteriores se agregan
+como capas `source`. Desde el corte, `allocate-sales-costs` consume las capas
+por FIFO, actualiza `fact_sales_line` y guarda el detalle de asignación en
+`sales_cost_allocations`. Las notas crédito reciben un costo estimado a partir
+del costo FIFO disponible y quedan identificadas como `estimated`.
+
+El dashboard usa `cogs_amount`, `unit_cost`, `margin_amount`, `cost_status`,
+`cost_confidence` y `cost_method`. Una línea puede quedar `partial` o
+`unavailable` si la cantidad vendida supera las capas conocidas; el sistema no
+inventa ese costo. El saldo actual del inventario sigue viniendo de la captura
+de Alegra, no de este ledger histórico.
 
 ## Control posterior
 
@@ -84,3 +90,33 @@ No se debe editar manualmente una capa certificada. Si el archivo fue
 incorrecto, se debe corregir la fuente y realizar una nueva carga con una
 fecha de corte diferente o ejecutar una migracion controlada, dejando la
 trazabilidad del cambio.
+
+## Asignación de costo a ventas
+
+Después de aplicar la migración y de tener el mart actualizado, el cálculo se
+puede ejecutar explícitamente:
+
+```powershell
+python -m app.cli allocate-sales-costs <tenant-uuid> --cutoff-date 2026-01-01
+```
+
+`refresh-mart` ya ejecuta esta asignación automáticamente después de reconstruir
+los hechos. Por eso el Cron existente de `refresh-mart` sigue siendo suficiente;
+no se necesita un tercer Cron para costos. La ejecución se registra en
+`sales_cost_allocation_runs`. Para controlar cobertura y excepciones:
+
+```sql
+SELECT status, lines_read, lines_costed, lines_partial, lines_unavailable,
+       sales_units, costed_units, cogs_amount, started_at, finished_at
+FROM sales_cost_allocation_runs
+WHERE tenant_id = '<tenant-uuid>'
+ORDER BY started_at DESC;
+
+SELECT cost_status, count(*), sum(net_sales_amount), sum(cogs_amount),
+       sum(margin_amount)
+FROM fact_sales_line
+WHERE tenant_id = '<tenant-uuid>'
+  AND is_deleted = false
+GROUP BY cost_status
+ORDER BY cost_status;
+```

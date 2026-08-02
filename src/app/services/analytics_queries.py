@@ -92,6 +92,7 @@ class AnalyticsQueryService:
 
     def sales(self, filters: AnalyticsFilters) -> dict[str, Any]:
         return {
+            "summary": self._sales_metrics(filters),
             "series": self._sales_series(filters),
             "by_product": self._sales_breakdown(filters, "product"),
             "by_seller": self._sales_breakdown(filters, "seller"),
@@ -483,6 +484,14 @@ class AnalyticsQueryService:
                    COALESCE(sum(f.net_sales_amount) /
                      NULLIF(count(DISTINCT (f.document_type, f.document_alegra_id)), 0), 0) AS average_ticket,
                    COALESCE(sum(f.net_sales_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_sale,
+                   COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
+                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin,
+                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) /
+                     NULLIF(sum(f.net_sales_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) * 100, 0) AS gross_margin_pct,
+                   COALESCE(count(*) FILTER (WHERE f.cost_status IN ('costed', 'estimated'))::numeric /
+                     NULLIF(count(*), 0) * 100, 0) AS cost_coverage_pct,
+                   count(*) FILTER (WHERE f.cost_status = 'partial') AS partial_cost_lines,
+                   count(*) FILTER (WHERE f.cost_status = 'unavailable') AS unavailable_cost_lines,
                    COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'invoice'), 0) AS invoice_sales,
                    abs(COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'credit_note'), 0)) AS credit_note_amount,
                    COALESCE(abs(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'credit_note')) /
@@ -737,8 +746,18 @@ class AnalyticsQueryService:
         return self._one(
             """
             SELECT id, status, started_at, finished_at, records_written, error_message,
-                   (finished_at IS NULL OR finished_at < now() - interval '2 hours') AS is_stale
+                   (finished_at IS NULL OR finished_at < now() - interval '2 hours') AS is_stale,
+                   cost.id AS cost_run_id, cost.status AS cost_status,
+                   cost.finished_at AS cost_finished_at,
+                   COALESCE(cost.finished_at IS NULL OR cost.finished_at < now() - interval '2 hours', true)
+                     AS cost_is_stale
             FROM mart_refresh_runs
+            LEFT JOIN LATERAL (
+              SELECT id, status, finished_at
+              FROM sales_cost_allocation_runs
+              WHERE tenant_id = mart_refresh_runs.tenant_id
+              ORDER BY started_at DESC LIMIT 1
+            ) cost ON true
             WHERE tenant_id = :tenant_id AND status = 'succeeded'
             ORDER BY started_at DESC LIMIT 1
             """
@@ -752,7 +771,16 @@ class AnalyticsQueryService:
                    COALESCE(sum(f.quantity), 0) AS units,
                    count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
                    COALESCE(sum(f.net_sales_amount) /
-                     NULLIF(count(DISTINCT (f.document_type, f.document_alegra_id)), 0), 0) AS average_ticket
+                     NULLIF(count(DISTINCT (f.document_type, f.document_alegra_id)), 0), 0) AS average_ticket,
+                   COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
+                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin,
+                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) /
+                     NULLIF(sum(f.net_sales_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) * 100, 0) AS gross_margin_pct,
+                   count(*) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS costed_lines,
+                   count(*) FILTER (WHERE f.cost_status = 'partial') AS partial_cost_lines,
+                   count(*) FILTER (WHERE f.cost_status = 'unavailable') AS unavailable_cost_lines,
+                   COALESCE(count(*) FILTER (WHERE f.cost_status IN ('costed', 'estimated'))::numeric /
+                     NULLIF(count(*), 0) * 100, 0) AS cost_coverage_pct
             FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
             WHERE {where} GROUP BY f.currency_code ORDER BY f.currency_code
             """,
@@ -766,7 +794,9 @@ class AnalyticsQueryService:
         return self._rows(
             f"""
             SELECT {period} AS period, f.currency_code,
-                   COALESCE(sum(f.net_sales_amount), 0) AS amount
+                   COALESCE(sum(f.net_sales_amount), 0) AS amount,
+                   COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
+                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin
             FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
             WHERE {where} GROUP BY period, f.currency_code ORDER BY period, f.currency_code
             """,
@@ -787,7 +817,9 @@ class AnalyticsQueryService:
             f"""
             SELECT COALESCE({label}, 'Sin dato') AS label, f.currency_code,
                    COALESCE(sum(f.net_sales_amount), 0) AS amount,
-                   COALESCE(sum(f.quantity), 0) AS quantity
+                   COALESCE(sum(f.quantity), 0) AS quantity,
+                   COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
+                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin
             FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
             {join}
             WHERE {where} GROUP BY label, f.currency_code

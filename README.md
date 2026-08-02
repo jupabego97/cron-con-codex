@@ -101,6 +101,16 @@ como excepciones auditables sin crear inventario. La carga es idempotente por
 tenant, fecha de corte y hash del archivo. Consulta
 `docs/architecture/phase-6-historical-cost.md` antes de cargarla en Railway.
 
+El refresco del mart también calcula COGS y margen bruto desde el corte
+certificado. Para ejecutarlo de forma explícita, sin reconstruir el mart:
+
+```powershell
+python -m app.cli allocate-sales-costs <tenant-uuid> --cutoff-date 2026-01-01
+```
+
+Las líneas sin cobertura no reciben un costo inventado: quedan visibles como
+`partial` o `unavailable` en el tablero y en `sales_cost_allocation_runs`.
+
 ## Dashboard interno
 
 El dashboard React se sirve desde la misma URL del API. Configura

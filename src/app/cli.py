@@ -19,6 +19,7 @@ from app.services.inventory_snapshot import InventorySnapshotService
 from app.services.invoice_reconciliation import InvoiceReconciliationService
 from app.services.invoice_sync import InvoiceSyncService
 from app.services.resource_sync import BackfillProgress, HistoricalBackfillService
+from app.services.sales_cost_allocation import HistoricalSalesCostService
 from app.services.webhook_worker import WebhookWorker
 
 
@@ -75,6 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rebuild the tenant analytics data mart from operational PostgreSQL projections",
     )
     mart.add_argument("tenant_id", type=uuid.UUID)
+
+    costs = subparsers.add_parser(
+        "allocate-sales-costs",
+        help="Allocate FIFO historical cost to sales lines from the certified opening basis",
+    )
+    costs.add_argument("tenant_id", type=uuid.UUID)
+    costs.add_argument("--cutoff-date", type=date.fromisoformat, default=date(2026, 1, 1))
 
     inventory_snapshot = subparsers.add_parser(
         "snapshot-inventory",
@@ -212,7 +220,24 @@ async def backfill_all(
 def refresh_mart(*, tenant_id: uuid.UUID) -> None:
     with get_session_factory()() as session:
         result = AnalyticsMartService(session=session).refresh(tenant_id=tenant_id)
-    print(f"{result.run_id} {result.status} written={result.records_written}")
+        costs = HistoricalSalesCostService(session=session).allocate(tenant_id=tenant_id)
+    print(
+        f"mart={result.run_id} {result.status} written={result.records_written} "
+        f"cost={costs.run_id} {costs.status} lines={costs.lines_costed}/"
+        f"{costs.lines_read} cogs={costs.cogs_amount}"
+    )
+
+
+def allocate_sales_costs(*, tenant_id: uuid.UUID, cutoff_date: date) -> None:
+    with get_session_factory()() as session:
+        result = HistoricalSalesCostService(session=session).allocate(
+            tenant_id=tenant_id, cutoff_date=cutoff_date
+        )
+    print(
+        f"{result.run_id} {result.status} read={result.lines_read} "
+        f"costed={result.lines_costed} partial={result.lines_partial} "
+        f"unavailable={result.lines_unavailable} cogs={result.cogs_amount}"
+    )
 
 
 def import_opening_inventory(
@@ -302,6 +327,8 @@ def main() -> None:
             raise SystemExit(1)
     elif args.command == "refresh-mart":
         refresh_mart(tenant_id=args.tenant_id)
+    elif args.command == "allocate-sales-costs":
+        allocate_sales_costs(tenant_id=args.tenant_id, cutoff_date=args.cutoff_date)
     elif args.command == "repair-purchase-lines":
         repair_purchase_lines(
             tenant_id=args.tenant_id,

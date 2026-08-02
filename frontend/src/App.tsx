@@ -182,7 +182,9 @@ function Select({ label, value, options, onChange }: { label: string; value?: st
 
 function RefreshNotice({ status }: { status: Row }) {
   if (status.status === "never_run") return <div className="warning">El mart aún no tiene ejecuciones exitosas.</div>;
-  return <div className={status.is_stale ? "warning" : "refresh-status"}>Mart: {status.is_stale ? "actualización pendiente" : "actualizado"} · {String(status.finished_at || status.started_at || "")}</div>;
+  const costStatus = status.cost_status ? " · Costos: " + String(status.cost_status) : "";
+  const className = status.is_stale || status.cost_is_stale ? "warning" : "refresh-status";
+  return <div className={className}>Mart: {status.is_stale ? "actualización pendiente" : "actualizado"} · {String(status.finished_at || status.started_at || "")}{costStatus}</div>;
 }
 
 function DashboardTab({ tab, data }: { tab: Tab; data: Record<string, unknown> | null }) {
@@ -210,6 +212,9 @@ function Overview({ data }: { data: Overview }) {
       return <MetricCard key={String(row.currency_code)} currency={String(row.currency_code || "COP")} current={row} previous={comparison} />;
     })}</section>
     <Chart title="Venta neta en el tiempo" data={data.series || []} dataKey="amount" moneyValue />
+    <CostMetrics rows={current} />
+    <Chart title="Costo de ventas" data={data.series || []} dataKey="cogs" moneyValue />
+    <Chart title="Margen bruto" data={data.series || []} dataKey="gross_margin" moneyValue />
   </>;
 }
 
@@ -218,6 +223,13 @@ function MetricCard({ currency, current, previous }: { currency: string; current
   const before = Number(previous?.net_sales || 0);
   const change = before ? ((sale - before) / Math.abs(before)) * 100 : null;
   return <article className="metric-card"><p>{currency} · Venta neta</p><strong>{money(sale, currency)}</strong><small>{change === null ? "Sin período comparable" : `${change >= 0 ? "+" : ""}${change.toFixed(1)}% vs. período anterior`}</small><dl><div><dt>Unidades</dt><dd>{number(current.units)}</dd></div><div><dt>Documentos</dt><dd>{number(current.documents)}</dd></div><div><dt>Ticket promedio</dt><dd>{money(current.average_ticket, currency)}</dd></div></dl></article>;
+}
+
+function CostMetrics({ rows }: { rows: Row[] }) {
+  return <section className="cards">{rows.map((row) => {
+    const currency = String(row.currency_code || "COP");
+    return <article className="metric-card compact" key={currency + "-cost"}><p>{currency} · Rentabilidad</p><strong>{money(row.gross_margin, currency)}</strong><small>Margen bruto estimado según cobertura disponible</small><dl><div><dt>COGS</dt><dd>{money(row.cogs, currency)}</dd></div><div><dt>Margen %</dt><dd>{percent(row.gross_margin_pct)}</dd></div><div><dt>Costo cubierto</dt><dd>{percent(row.cost_coverage_pct)}</dd></div><div><dt>Líneas parciales</dt><dd>{number(row.partial_cost_lines)}</dd></div><div><dt>Sin costo</dt><dd>{number(row.unavailable_cost_lines)}</dd></div></dl></article>;
+  })}</section>;
 }
 
 function percent(value: string | number | null | undefined): string {
@@ -240,6 +252,7 @@ function KpiView({ data }: { data: Record<string, unknown> }) {
       const currency = String(row.currency_code || "COP");
       return <article className="metric-card" key={currency}><p>{currency} · Unidades por transacción</p><strong>{number(row.units_per_transaction)}</strong><small>{row.sales_pace_vs_target_pct == null ? "Meta mensual no configurada" : `${number(row.sales_pace_vs_target_pct)}% del ritmo meta`}</small><dl><div><dt>Venta neta</dt><dd>{money(row.net_sales, currency)}</dd></div><div><dt>Ticket promedio</dt><dd>{money(row.average_ticket, currency)}</dd></div><div><dt>Precio neto/unidad</dt><dd>{money(row.average_unit_sale, currency)}</dd></div><div><dt>Notas crédito</dt><dd>{percent(row.credit_note_rate)}</dd></div></dl></article>;
     })}</section>
+    <CostMetrics rows={sales} />
     <h3 className="section-title">Clientes</h3>
     <section className="cards">{customers.map((row) => <article className="metric-card" key={String(row.currency_code || "COP")}><p>{String(row.currency_code || "COP")} · Clientes activos</p><strong>{number(row.active_customers)}</strong><small>con compra o nota crédito en el período</small><dl><div><dt>Recurrentes</dt><dd>{percent(row.repeat_customer_rate)}</dd></div><div><dt>Nuevos</dt><dd>{number(row.new_customers)}</dd></div><div><dt>Concentración Top 5</dt><dd>{percent(row.top_5_customer_concentration)}</dd></div></dl></article>)}</section>
     <h3 className="section-title">Compras y proveedores</h3>
@@ -288,7 +301,7 @@ function DomainView({ title, data, amountKey }: { title: string; data: Record<st
   const summary = (data.summary || []) as Row[];
   const series = (data.series || []) as Row[];
   const sections = Object.entries(data).filter(([key]) => !["summary", "series"].includes(key));
-  return <><h2>{title}</h2><section className="cards">{summary.map((row) => <article className="metric-card compact" key={String(row.currency_code || row.label)}><p>{String(row.currency_code || row.label || "Total")}</p><strong>{money(row.amount ?? row.purchase_amount, String(row.currency_code || "COP"))}</strong><small>{number(row.documents ?? row.payments ?? row.quantity)} registros</small></article>)}</section><Chart title={`${title} en el tiempo`} data={series} dataKey={amountKey} moneyValue />{sections.map(([key, value]) => Array.isArray(value) ? <Chart key={key} title={labelFor(key)} data={value as Row[]} dataKey={key === "stock_coverage" ? "coverage_days" : amountKey} moneyValue={key !== "stock_coverage"} /> : null)}</>;
+  return <>{title === "Ventas" && <CostMetrics rows={summary} />}<h2>{title}</h2><section className="cards">{summary.map((row) => <article className="metric-card compact" key={String(row.currency_code || row.label)}><p>{String(row.currency_code || row.label || "Total")}</p><strong>{money(row.amount ?? row.purchase_amount ?? row.net_sales, String(row.currency_code || "COP"))}</strong><small>{number(row.documents ?? row.payments ?? row.quantity)} registros</small></article>)}</section><Chart title={`${title} en el tiempo`} data={series} dataKey={amountKey} moneyValue />{sections.map(([key, value]) => Array.isArray(value) ? <Chart key={key} title={labelFor(key)} data={value as Row[]} dataKey={key === "stock_coverage" ? "coverage_days" : amountKey} moneyValue={key !== "stock_coverage"} /> : null)}</>;
 }
 
 function Inventory({ data }: { data: Record<string, unknown> }) {
