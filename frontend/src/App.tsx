@@ -195,7 +195,7 @@ function RefreshNotice({ status }: { status: Row }) {
 function DashboardTab({ tab, data }: { tab: Tab; data: Record<string, unknown> | null }) {
   if (!data) return <div className="empty">No hay datos para el período seleccionado.</div>;
   if (tab === "overview") return <Overview data={data as unknown as Overview} />;
-  if (tab === "sales") return <DomainView title="Ventas" data={data} amountKey="amount" />;
+  if (tab === "sales") return <SalesReports data={data} />;
   if (tab === "purchases") return <DomainView title="Compras" data={data} amountKey="amount" />;
   if (tab === "suppliers") return <SupplierReports data={data} />;
   if (tab === "payments") return <DomainView title="Pagos" data={data} amountKey="amount" />;
@@ -300,6 +300,35 @@ function PurchaseRecommendations({ data }: { data: Record<string, unknown> }) {
     </section>
     <div className="warning">La demanda se calcula entre {String(parameters.demand_from || "")} y {String(parameters.demand_to || "")}. El stock se toma del último snapshot y, si filtras una bodega, la demanda sigue siendo global porque las facturas actuales no tienen bodega confiable.</div>
     {!rows.length ? <div className="empty">No hay recomendaciones para estos filtros. Revisa si existe un snapshot y si los productos tienen demanda reciente.</div> : <section className="table-card"><h3>Cola de reposición</h3><table><thead><tr><th>Prioridad</th><th>Producto</th><th>Proveedor sugerido</th><th>Stock</th><th>Velocidad/día</th><th>Cobertura</th><th>Comprar</th><th>Costo estimado</th><th>Motivo</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.product}-${index}`}><td>{String(row.priority)}</td><td>{String(row.product)}{row.reference ? ` · ${String(row.reference)}` : ""}</td><td>{String(row.preferred_supplier || "Sin proveedor")}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.daily_velocity)}</td><td>{row.coverage_days == null ? "Agotado" : `${number(row.coverage_days)} días`}</td><td>{number(row.recommended_quantity)}</td><td>{money(row.estimated_purchase_value, String(row.currency_code || "COP"))}</td><td>{String(row.reason)}</td></tr>)}</tbody></table></section>}
+  </>;
+}
+
+function SalesReports({ data }: { data: Record<string, unknown> }) {
+  const summary = (data.summary || []) as Row[];
+  const families = (data.by_family_detail || []) as Row[];
+  const products = (data.product_detail || []) as Row[];
+  const sellers = (data.seller_detail || []) as Row[];
+  const customers = (data.customer_detail || []) as Row[];
+  const statuses = (data.status_detail || []) as Row[];
+  const familyChart = families.map((row) => ({ ...row, label: row.family }));
+  return <>
+    <h2>Ventas</h2>
+    <p className="muted">La venta neta incluye las notas crédito como valores negativos. El margen usa únicamente líneas con costo histórico disponible.</p>
+    <section className="cards">{summary.map((row) => {
+      const currency = String(row.currency_code || "COP");
+      return <article className="metric-card" key={currency}>
+        <p>{currency} · Venta neta</p><strong>{money(row.net_sales, currency)}</strong>
+        <small>{number(row.documents)} documentos · {number(row.units)} unidades</small>
+        <dl><div><dt>Ticket promedio</dt><dd>{money(row.average_ticket, currency)}</dd></div><div><dt>Ventas facturadas</dt><dd>{money(row.invoice_sales, currency)}</dd></div><div><dt>Notas crédito</dt><dd>{money(row.credit_note_amount, currency)}</dd></div><div><dt>Margen bruto</dt><dd>{money(row.gross_margin, currency)}</dd></div><div><dt>Margen %</dt><dd>{percent(row.gross_margin_pct)}</dd></div><div><dt>Costo cubierto</dt><dd>{percent(row.cost_coverage_pct)}</dd></div></dl>
+      </article>;
+    })}</section>
+    <Chart title="Ventas en el tiempo" data={(data.series || []) as Row[]} dataKey="amount" moneyValue />
+    <Chart title="Ventas por familia" data={familyChart} dataKey="net_sales" moneyValue />
+    <section className="table-card"><h3>Productos más vendidos</h3>{products.length ? <table><thead><tr><th>Producto</th><th>Familia</th><th>Venta neta</th><th>Participación</th><th>Unidades</th><th>Documentos</th><th>Precio promedio</th><th>Margen %</th><th>Última venta</th></tr></thead><tbody>{products.slice(0, 100).map((row, index) => <tr key={`${row.product}-${index}`}><td>{String(row.product)}{row.reference ? ` · ${String(row.reference)}` : ""}</td><td>{String(row.family)}</td><td>{money(row.net_sales, String(row.currency_code || "COP"))}</td><td>{percent(row.share_pct)}</td><td>{number(row.units)}</td><td>{number(row.documents)}</td><td>{money(row.average_unit_sale, String(row.currency_code || "COP"))}</td><td>{percent(row.gross_margin_pct)}</td><td>{String(row.last_sale_date || "")}</td></tr>)}</tbody></table> : <p className="muted">Sin ventas para estos filtros.</p>}</section>
+    <section className="table-card"><h3>Ventas por familia</h3>{families.length ? <table><thead><tr><th>Familia</th><th>Venta neta</th><th>Participación</th><th>Unidades</th><th>Documentos</th><th>Productos</th><th>Margen %</th></tr></thead><tbody>{families.map((row, index) => <tr key={`${row.family}-${index}`}><td>{String(row.family)}</td><td>{money(row.net_sales, String(row.currency_code || "COP"))}</td><td>{percent(row.share_pct)}</td><td>{number(row.units)}</td><td>{number(row.documents)}</td><td>{number(row.product_count)}</td><td>{percent(row.gross_margin_pct)}</td></tr>)}</tbody></table> : <p className="muted">Sin familias para estos filtros.</p>}</section>
+    <section className="table-card"><h3>Rendimiento por vendedor</h3>{sellers.length ? <table><thead><tr><th>Vendedor</th><th>Venta neta</th><th>Participación</th><th>Unidades</th><th>Documentos</th><th>Margen %</th></tr></thead><tbody>{sellers.map((row, index) => <tr key={`${row.seller}-${index}`}><td>{String(row.seller)}</td><td>{money(row.net_sales, String(row.currency_code || "COP"))}</td><td>{percent(row.share_pct)}</td><td>{number(row.units)}</td><td>{number(row.documents)}</td><td>{percent(row.gross_margin_pct)}</td></tr>)}</tbody></table> : <p className="muted">Sin vendedores para estos filtros.</p>}</section>
+    <section className="table-card"><h3>Clientes principales</h3>{customers.length ? <table><thead><tr><th>Cliente</th><th>Venta neta</th><th>Participación</th><th>Unidades</th><th>Documentos</th><th>Última venta</th></tr></thead><tbody>{customers.slice(0, 100).map((row, index) => <tr key={`${row.customer}-${index}`}><td>{String(row.customer)}</td><td>{money(row.net_sales, String(row.currency_code || "COP"))}</td><td>{percent(row.share_pct)}</td><td>{number(row.units)}</td><td>{number(row.documents)}</td><td>{String(row.last_sale_date || "")}</td></tr>)}</tbody></table> : <p className="muted">Sin clientes para estos filtros.</p>}</section>
+    <section className="table-card"><h3>Desglose por estado del documento</h3>{statuses.length ? <table><thead><tr><th>Estado</th><th>Venta neta</th><th>Participación</th><th>Unidades</th><th>Documentos</th><th>Margen %</th></tr></thead><tbody>{statuses.map((row, index) => <tr key={`${row.status}-${index}`}><td>{String(row.status)}</td><td>{money(row.net_sales, String(row.currency_code || "COP"))}</td><td>{percent(row.share_pct)}</td><td>{number(row.units)}</td><td>{number(row.documents)}</td><td>{percent(row.gross_margin_pct)}</td></tr>)}</tbody></table> : <p className="muted">Sin estados para estos filtros.</p>}</section>
   </>;
 }
 

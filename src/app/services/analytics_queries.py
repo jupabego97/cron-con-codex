@@ -120,7 +120,79 @@ class AnalyticsQueryService:
             "by_warehouse": self._sales_breakdown(filters, "warehouse"),
             "by_customer": self._sales_breakdown(filters, "customer"),
             "by_status": self._sales_breakdown(filters, "status"),
+            "by_family_detail": self._sales_detail(
+                filters,
+                joins="LEFT JOIN dim_product p ON p.key = f.product_key",
+                dimension_select="COALESCE(p.family_name, 'SIN FAMILIA') AS family",
+                group_by="COALESCE(p.family_name, 'SIN FAMILIA')",
+            ),
+            "product_detail": self._sales_detail(
+                filters,
+                joins="LEFT JOIN dim_product p ON p.key = f.product_key",
+                dimension_select="COALESCE(p.name, 'Sin producto') AS product, "
+                "p.reference, COALESCE(p.family_name, 'SIN FAMILIA') AS family",
+                group_by="p.name, p.reference, COALESCE(p.family_name, 'SIN FAMILIA')",
+            ),
+            "seller_detail": self._sales_detail(
+                filters,
+                joins="LEFT JOIN dim_seller s ON s.key = f.seller_key",
+                dimension_select="COALESCE(s.name, 'Sin vendedor') AS seller",
+                group_by="COALESCE(s.name, 'Sin vendedor')",
+            ),
+            "customer_detail": self._sales_detail(
+                filters,
+                joins="LEFT JOIN dim_contact c ON c.key = f.contact_key",
+                dimension_select="COALESCE(c.name, 'Sin cliente') AS customer",
+                group_by="COALESCE(c.name, 'Sin cliente')",
+            ),
+            "status_detail": self._sales_detail(
+                filters,
+                joins="",
+                dimension_select="COALESCE(f.document_status, 'Sin estado') AS status",
+                group_by="COALESCE(f.document_status, 'Sin estado')",
+            ),
         }
+
+    def _sales_detail(
+        self,
+        filters: AnalyticsFilters,
+        *,
+        joins: str,
+        dimension_select: str,
+        group_by: str,
+    ) -> list[dict[str, Any]]:
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        currency = "COALESCE(f.currency_code, 'COP')"
+        return self._rows(
+            f"""
+            WITH aggregated AS (
+              SELECT {dimension_select}, {currency} AS currency_code,
+                     COALESCE(sum(f.net_sales_amount), 0) AS net_sales,
+                     COALESCE(sum(f.quantity), 0) AS units,
+                     count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
+                     COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'invoice'), 0) AS invoice_sales,
+                     abs(COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'credit_note'), 0)) AS credit_note_amount,
+                     COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
+                     COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin,
+                     COALESCE(sum(f.net_sales_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_sale,
+                     count(*) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS costed_lines,
+                     count(*) FILTER (WHERE f.cost_status = 'unavailable') AS unavailable_cost_lines,
+                     max(d.calendar_date) AS last_sale_date
+              FROM fact_sales_line f
+              JOIN dim_date d ON d.date_key = f.date_key
+              {joins}
+              WHERE {where}
+              GROUP BY {group_by}, {currency}
+            )
+            SELECT aggregated.*,
+                   COALESCE(gross_margin / NULLIF(net_sales, 0) * 100, 0) AS gross_margin_pct,
+                   COALESCE(net_sales / NULLIF(sum(net_sales) OVER (PARTITION BY currency_code), 0) * 100, 0) AS share_pct
+            FROM aggregated
+            ORDER BY net_sales DESC
+            LIMIT 200
+            """,
+            params,
+        )
 
     def purchases(self, filters: AnalyticsFilters) -> dict[str, Any]:
         where, params = self._fact_where(

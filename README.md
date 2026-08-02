@@ -128,3 +128,4 @@ moneda en el mart. Consulta `docs/architecture/phase-5-dashboard.md` y
 - [Fase 2: webhooks y reconciliación](docs/architecture/phase-2-webhooks-reconciliation.md)
 - [Fase 3: operación local controlada](docs/architecture/phase-3-local-operation.md)
 - [Fase 7: familias y proveedores](docs/architecture/phase-7-families-suppliers.md)
+- [Fase 8: analítica de ventas](docs/architecture/phase-8-sales-analytics.md)
