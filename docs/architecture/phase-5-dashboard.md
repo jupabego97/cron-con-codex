@@ -68,3 +68,30 @@ la demanda neta del rango seleccionado y el costo unitario disponible. Por defec
 busca completar 30 dÃ­as de cobertura, considera 7 dÃ­as de plazo y 7 dÃ­as de
 seguridad, y clasifica cada referencia como crÃ­tica, alta o media. Solo recomienda
 productos con demanda observada; no crea Ã³rdenes automÃ¡ticas.
+
+
+## Reposición accionable
+
+La pestaña **Reponer** consume el snapshot actual y la demanda del mart para
+calcular velocidad seleccionada y contexto de 7, 30 y 90 días. La cantidad
+sugerida completa la cobertura objetivo y no descuenta órdenes pendientes hasta
+que exista una fuente confiable de compras abiertas.
+
+La tabla supplier_product_stats conserva por producto, proveedor y moneda:
+
+- frecuencia y unidades compradas;
+- costo promedio, mediano, mínimo, máximo y último;
+- última compra;
+- participación de líneas y unidades;
+- ranking modal y ranking por costo.
+
+El proveedor principal se sugiere por historial modal y se muestran hasta tres
+alternativas. La aplicación distingue proveedor histórico, proveedor actual del
+catálogo y ausencia de historial. No afirma disponibilidad, plazo o condiciones
+comerciales que todavía no estén integradas.
+
+La tabla replenishment_item_actions permite marcar cada recomendación como
+pendiente, revisada, pospuesta, comprada o descartada, guardar una nota y
+conservar ese estado entre refrescos del mart. El endpoint de exportación
+genera un CSV agrupable por proveedor para preparar la compra manualmente; no
+crea órdenes automáticamente en Alegra.

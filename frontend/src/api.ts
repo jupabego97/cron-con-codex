@@ -27,9 +27,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function query(filters: Filters): string {
+export function query(filters: Filters, extras: Record<string, string | number | undefined> = {}): string {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(filters)) {
+  for (const [key, value] of Object.entries({ ...filters, ...extras })) {
     if (value) params.set(key, value);
   }
   const value = params.toString();

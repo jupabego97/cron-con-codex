@@ -16,6 +16,21 @@ import { money, number } from "./format";
 
 type Tab = "overview" | "sales" | "purchases" | "suppliers" | "payments" | "customers" | "products" | "kpis" | "purchase-recommendations" | "inventory" | "alerts";
 type Row = Record<string, string | number | null>;
+type SupplierOption = {
+  supplier_key?: number | null;
+  supplier?: string | null;
+  is_modal?: boolean;
+  confidence_pct?: number | null;
+  unit_share_pct?: number | null;
+  purchase_lines?: number | null;
+  average_unit_cost?: number | null;
+  median_unit_cost?: number | null;
+  minimum_unit_cost?: number | null;
+  maximum_unit_cost?: number | null;
+  last_unit_cost?: number | null;
+  last_purchase_date?: string | null;
+};
+type RecommendationRow = Row & { supplier_options?: SupplierOption[] };
 type FilterData = {
   date_range: { min_date?: string; max_date?: string };
   currencies: Option[];
@@ -27,6 +42,11 @@ type FilterData = {
   document_statuses: Option[];
 };
 type Overview = { current: Row[]; previous: Row[]; series: Row[] };
+type ReplenishmentParams = {
+  target_coverage_days: number;
+  lead_time_days: number;
+  safety_days: number;
+};
 
 const tabs: Array<[Tab, string]> = [
   ["overview", "Resumen"],
@@ -62,6 +82,11 @@ export default function App() {
   const [status, setStatus] = useState<Row | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [replenishmentParams, setReplenishmentParams] = useState<ReplenishmentParams>({
+    target_coverage_days: 30,
+    lead_time_days: 7,
+    safety_days: 7,
+  });
 
   useEffect(() => {
     api<{ authenticated: boolean }>("/dashboard/session")
@@ -83,11 +108,11 @@ export default function App() {
     if (!authenticated) return;
     setLoading(true);
     setError(null);
-    api<Record<string, unknown>>(`/analytics/${tab}${query(filters)}`)
+    api<Record<string, unknown>>(`/analytics/${tab}${query(filters, tab === "purchase-recommendations" ? replenishmentParams : {})}`)
       .then(setData)
       .catch((requestError: Error) => setError(requestError.message))
       .finally(() => setLoading(false));
-  }, [authenticated, filters, tab]);
+  }, [authenticated, filters, tab, replenishmentParams]);
 
   if (authenticated === null) return <main className="splash">Cargando Retail Intelligence…</main>;
   if (!authenticated) return <Login onLogin={() => setAuthenticated(true)} />;
@@ -116,7 +141,7 @@ export default function App() {
         ))}
       </nav>
       {error && <div className="error">{error}</div>}
-      {loading ? <div className="loading">Actualizando indicadores…</div> : <DashboardTab tab={tab} data={data} />}
+      {loading ? <div className="loading">Actualizando indicadores…</div> : <DashboardTab tab={tab} data={data} filters={filters} replenishmentParams={replenishmentParams} setReplenishmentParams={setReplenishmentParams} />}
     </main>
   );
 }
@@ -192,7 +217,7 @@ function RefreshNotice({ status }: { status: Row }) {
   return <div className={className}>Mart: {status.is_stale ? "actualización pendiente" : "actualizado"} · {String(status.finished_at || status.started_at || "")}{costStatus}</div>;
 }
 
-function DashboardTab({ tab, data }: { tab: Tab; data: Record<string, unknown> | null }) {
+function DashboardTab({ tab, data, filters, replenishmentParams, setReplenishmentParams }: { tab: Tab; data: Record<string, unknown> | null; filters: Filters; replenishmentParams: ReplenishmentParams; setReplenishmentParams: (value: ReplenishmentParams) => void }) {
   if (!data) return <div className="empty">No hay datos para el período seleccionado.</div>;
   if (tab === "overview") return <Overview data={data as unknown as Overview} />;
   if (tab === "sales") return <SalesReports data={data} />;
@@ -202,7 +227,7 @@ function DashboardTab({ tab, data }: { tab: Tab; data: Record<string, unknown> |
   if (tab === "customers") return <DomainView title="Clientes" data={data} amountKey="amount" />;
   if (tab === "products") return <DomainView title="Productos y rotaciÃ³n" data={data} amountKey="amount" />;
   if (tab === "kpis") return <KpiView data={data} />;
-  if (tab === "purchase-recommendations") return <PurchaseRecommendations data={data} />;
+  if (tab === "purchase-recommendations") return <PurchaseRecommendations data={data} filters={filters} replenishmentParams={replenishmentParams} setReplenishmentParams={setReplenishmentParams} />;
   if (tab === "alerts") return <Alerts data={data} />;
   return <Inventory data={data} />;
 }
@@ -280,27 +305,115 @@ function StockPriorityTable({ title, rows, coverage = false }: { title: string; 
   return <section className="table-card"><h3>{title}</h3><table><thead><tr><th>Producto</th><th>Stock</th><th>Unidades vendidas</th>{coverage && <th>Cobertura</th>}<th>Valor a costo</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.label}-${index}`}><td>{String(row.label)}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.period_units_sold)}</td>{coverage && <td>{number(row.coverage_days)} días</td>}<td>{money(row.inventory_value)}</td></tr>)}</tbody></table></section>;
 }
 
-function PurchaseRecommendations({ data }: { data: Record<string, unknown> }) {
-  const rows = (data.items || []) as Row[];
+function PurchaseRecommendations({ data, filters, replenishmentParams, setReplenishmentParams }: { data: Record<string, unknown>; filters: Filters; replenishmentParams: ReplenishmentParams; setReplenishmentParams: (value: ReplenishmentParams) => void }) {
+  const rows = (data.items || []) as RecommendationRow[];
+  const excessItems = (data.excess_items || []) as RecommendationRow[];
+  const slowItems = (data.slow_items || []) as RecommendationRow[];
   const parameters = (data.parameters || {}) as Row;
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [localStatuses, setLocalStatuses] = useState<Record<string, string>>({});
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [savingProduct, setSavingProduct] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const nextStatuses: Record<string, string> = {};
+    const nextNotes: Record<string, string> = {};
+    rows.forEach((row) => {
+      const key = String(row.product_key);
+      nextStatuses[key] = String(row.review_status || "pending");
+      nextNotes[key] = String(row.review_note || "");
+    });
+    setLocalStatuses(nextStatuses);
+    setNotes(nextNotes);
+    setStatusFilter("all");
+  }, [data]);
+
+  const currentStatus = (row: RecommendationRow) => localStatuses[String(row.product_key)] || String(row.review_status || "pending");
+  const visibleRows = rows.filter((row) => statusFilter === "all" || currentStatus(row) === statusFilter);
+  const estimatedValue = rows.reduce((total, row) => total + Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), 0);
   const counts = rows.reduce<Record<string, number>>((result, row) => {
     const priority = String(row.priority || "medium");
     result[priority] = (result[priority] || 0) + 1;
     return result;
   }, {});
-  const estimatedValue = rows.reduce((total, row) => total + Number(row.estimated_purchase_value || 0), 0);
+  const noSupplier = rows.filter((row) => !row.preferred_supplier).length;
+  const groups = visibleRows.reduce<Record<string, RecommendationRow[]>>((result, row) => {
+    const supplier = String(row.preferred_supplier || "Sin proveedor");
+    (result[supplier] ||= []).push(row);
+    return result;
+  }, {});
+
+  async function saveAction(row: RecommendationRow, status: string, note = notes[String(row.product_key)] || "") {
+    const productKey = String(row.product_key);
+    setSavingProduct(productKey);
+    setActionError(null);
+    try {
+      const snoozedUntil = status === "snoozed"
+        ? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+        : null;
+      await api("/analytics/purchase-recommendations/" + productKey, {
+        method: "PATCH",
+        body: JSON.stringify({ status, note: note || null, snoozed_until: snoozedUntil }),
+      });
+      setLocalStatuses((current) => ({ ...current, [productKey]: status }));
+    } catch (requestError) {
+      setActionError(requestError instanceof Error ? requestError.message : "No fue posible guardar el estado.");
+    } finally {
+      setSavingProduct(null);
+    }
+  }
+
+  async function exportCsv() {
+    setActionError(null);
+    try {
+      const response = await fetch("/api/v1/analytics/purchase-recommendations/export" + query(filters), { credentials: "same-origin" });
+      if (!response.ok) throw new Error("No fue posible exportar las recomendaciones.");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "reponer.csv";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (requestError) {
+      setActionError(requestError instanceof Error ? requestError.message : "No fue posible exportar.");
+    }
+  }
+
   return <>
-    <h2>Recomendación de compra</h2>
-    <p className="muted">Cola priorizada para revisión manual. Sugiere cantidades, no crea órdenes ni reemplaza la negociación con el proveedor.</p>
+    <div className="section-heading"><div><h2>Reponer</h2><p className="muted">Cola de decisión de compra basada en stock, demanda, cobertura y proveedores históricos.</p></div><button className="primary-button compact-button" onClick={exportCsv}>Exportar CSV</button></div>
     <section className="cards">
       <article className="metric-card"><p>Productos sugeridos</p><strong>{number(rows.length)}</strong><small>{number(parameters.target_coverage_days)} días de cobertura objetivo</small></article>
-      <article className="metric-card"><p>Críticos / agotados</p><strong>{number(counts.critical || 0)}</strong><small>con demanda neta reciente</small></article>
-      <article className="metric-card"><p>Alta prioridad</p><strong>{number(counts.high || 0)}</strong><small>no alcanzan plazo + seguridad</small></article>
-      <article className="metric-card"><p>Compra estimada</p><strong>{money(estimatedValue)}</strong><small>costo reportado; confirmar moneda y proveedor</small></article>
+      <article className="metric-card"><p>Críticos / agotados</p><strong>{number(counts.critical || 0)}</strong><small>con demanda reciente</small></article>
+      <article className="metric-card"><p>Sin proveedor</p><strong>{number(noSupplier)}</strong><small>requieren validación manual</small></article>
+      <article className="metric-card"><p>Compra estimada</p><strong>{money(estimatedValue)}</strong><small>costo histórico disponible</small></article>
     </section>
-    <div className="warning">La demanda se calcula entre {String(parameters.demand_from || "")} y {String(parameters.demand_to || "")}. El stock se toma del último snapshot y, si filtras una bodega, la demanda sigue siendo global porque las facturas actuales no tienen bodega confiable.</div>
-    {!rows.length ? <div className="empty">No hay recomendaciones para estos filtros. Revisa si existe un snapshot y si los productos tienen demanda reciente.</div> : <section className="table-card"><h3>Cola de reposición</h3><table><thead><tr><th>Prioridad</th><th>Producto</th><th>Proveedor sugerido</th><th>Stock</th><th>Velocidad/día</th><th>Cobertura</th><th>Comprar</th><th>Costo estimado</th><th>Motivo</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.product}-${index}`}><td>{String(row.priority)}</td><td>{String(row.product)}{row.reference ? ` · ${String(row.reference)}` : ""}</td><td>{String(row.preferred_supplier || "Sin proveedor")}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.daily_velocity)}</td><td>{row.coverage_days == null ? "Agotado" : `${number(row.coverage_days)} días`}</td><td>{number(row.recommended_quantity)}</td><td>{money(row.estimated_purchase_value, String(row.currency_code || "COP"))}</td><td>{String(row.reason)}</td></tr>)}</tbody></table></section>}
+    <div className="warning">Demanda seleccionada: {String(parameters.demand_from || "")} a {String(parameters.demand_to || "")}. También se muestran velocidades de 7, 30 y 90 días. El stock proviene del último snapshot de Alegra; no se descuentan órdenes pendientes porque aún no están integradas.</div>
+    {actionError && <div className="error">{actionError}</div>}
+    <section className="filters compact-filters">
+      <label>Estado de revisión<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">Todos</option><option value="pending">Pendientes</option><option value="reviewed">Revisados</option><option value="snoozed">Pospuestos</option><option value="purchased">Comprados</option><option value="discarded">Descartados</option></select></label>
+      <label>Cobertura objetivo<input type="number" min="7" max="365" value={replenishmentParams.target_coverage_days} onChange={(event) => setReplenishmentParams({ ...replenishmentParams, target_coverage_days: Number(event.target.value) || 30 })} /></label>
+      <label>Plazo compra<input type="number" min="0" max="90" value={replenishmentParams.lead_time_days} onChange={(event) => setReplenishmentParams({ ...replenishmentParams, lead_time_days: Number(event.target.value) || 0 })} /></label>
+      <label>Días seguridad<input type="number" min="0" max="90" value={replenishmentParams.safety_days} onChange={(event) => setReplenishmentParams({ ...replenishmentParams, safety_days: Number(event.target.value) || 0 })} /></label>
+    </section>
+    {!visibleRows.length ? <div className="empty">No hay recomendaciones para este filtro.</div> : <>
+      <section className="table-card"><h3>Plan agrupado por proveedor</h3><table><thead><tr><th>Proveedor</th><th>Productos</th><th>Unidades</th><th>Compra estimada</th><th>Críticos</th></tr></thead><tbody>{Object.entries(groups).sort(([, left], [, right]) => right.reduce((sum, row) => sum + Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), 0) - left.reduce((sum, row) => sum + Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), 0)).map(([supplier, supplierRows]) => <tr key={supplier}><td>{supplier}</td><td>{number(supplierRows.length)}</td><td>{number(supplierRows.reduce((sum, row) => sum + Number(row.recommended_quantity || 0), 0))}</td><td>{money(supplierRows.reduce((sum, row) => sum + Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), 0))}</td><td>{number(supplierRows.filter((row) => row.priority === "critical").length)}</td></tr>)}</tbody></table></section>
+      <section className="table-card"><h3>Cola de reposición</h3><div className="table-scroll"><table><thead><tr><th>Estado</th><th>Prioridad</th><th>Producto</th><th>Proveedor</th><th>Stock</th><th>Velocidad 7/30/90</th><th>Cobertura</th><th>Comprar</th><th>Costo</th><th>Valor</th><th>Confianza</th><th>Motivo</th><th>Revisión</th></tr></thead><tbody>{visibleRows.map((row, index) => {
+        const key = String(row.product_key || index);
+        const options = row.supplier_options || [];
+        const status = currentStatus(row);
+        return <tr key={key}><td><select value={status} disabled={savingProduct === key} onChange={(event) => saveAction(row, event.target.value)}><option value="pending">Pendiente</option><option value="reviewed">Revisado</option><option value="snoozed">Posponer 14 días</option><option value="purchased">Comprado</option><option value="discarded">Descartado</option></select></td><td>{String(row.priority)}</td><td>{String(row.name)}{row.reference ? " · " + String(row.reference) : ""}<small className="table-subtitle">{String(row.family)}</small></td><td>{String(row.preferred_supplier || "Sin proveedor")}<small className="table-subtitle">{String(row.supplier_source || "")}</small>{options.length > 0 && <details><summary>{options.length} opciones</summary><div className="supplier-options">{options.map((option, optionIndex) => <div key={String(option.supplier_key || optionIndex)}>{String(option.supplier || "Sin proveedor")} · {money(option.average_unit_cost)} · {number(option.confidence_pct)}% frecuencia · {String(option.last_purchase_date || "sin fecha")}</div>)}</div></details>}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.units_7d)} / {number(row.units_30d)} / {number(row.units_90d)}</td><td>{row.coverage_days == null ? "Agotado" : number(row.coverage_days) + " días"}</td><td>{number(row.recommended_quantity)}</td><td>{money(row.unit_cost, String(row.currency_code || "COP"))}</td><td>{money(Number(row.recommended_quantity || 0) * Number(row.unit_cost || 0), String(row.currency_code || "COP"))}</td><td>{number(row.supplier_confidence_pct)}%</td><td>{String(row.reason)}</td><td><input className="inline-note" value={notes[key] || ""} placeholder="Nota" onChange={(event) => setNotes((current) => ({ ...current, [key]: event.target.value }))} onBlur={() => saveAction(row, status)} /></td></tr>;
+      })}</tbody></table></div></section>
+      <ReplenishmentOpportunityTable title="Exceso de cobertura (120 días o más)" rows={excessItems} coverage />
+      <ReplenishmentOpportunityTable title="Inventario sin demanda en 90 días" rows={slowItems} />
+    </>}
   </>;
+}
+
+function ReplenishmentOpportunityTable({ title, rows, coverage = false }: { title: string; rows: RecommendationRow[]; coverage?: boolean }) {
+  if (!rows.length) return <section className="table-card"><h3>{title}</h3><p className="muted">Sin productos para estos criterios.</p></section>;
+  return <section className="table-card"><h3>{title}</h3><table><thead><tr><th>Producto</th><th>Familia</th><th>Stock</th><th>Venta 90 días</th>{coverage && <th>Cobertura</th>}<th>Valor inventario</th></tr></thead><tbody>{rows.slice(0, 100).map((row, index) => <tr key={String(row.product_key || index)}><td>{String(row.name)}{row.reference ? " · " + String(row.reference) : ""}</td><td>{String(row.family)}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.units_90d)}</td>{coverage && <td>{number(row.coverage_days)} días</td>}<td>{money(row.inventory_value)}</td></tr>)}</tbody></table></section>;
 }
 
 function SalesReports({ data }: { data: Record<string, unknown> }) {

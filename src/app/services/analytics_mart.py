@@ -366,4 +366,74 @@ _DERIVED = (
         WHERE supplier_rank = 1
         """
     ),
+    text("DELETE FROM supplier_product_stats WHERE tenant_id = :tenant_id"),
+    text(
+        """
+        WITH supplier_stats AS (
+          SELECT f.tenant_id, f.product_key, f.provider_key AS supplier_key,
+                 COALESCE(f.currency_code, :default_currency_code) AS currency_code,
+                 count(*)::integer AS purchase_line_count,
+                 COALESCE(sum(f.quantity), 0) AS purchased_units,
+                 COALESCE(sum(f.purchase_amount), 0) AS purchased_amount,
+                 COALESCE(sum(f.purchase_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_cost,
+                 percentile_cont(0.5) WITHIN GROUP (ORDER BY f.unit_cost)
+                   FILTER (WHERE f.unit_cost IS NOT NULL AND f.unit_cost > 0) AS median_unit_cost,
+                 min(f.unit_cost) FILTER (WHERE f.unit_cost IS NOT NULL AND f.unit_cost > 0) AS minimum_unit_cost,
+                 max(f.unit_cost) FILTER (WHERE f.unit_cost IS NOT NULL AND f.unit_cost > 0) AS maximum_unit_cost,
+                 (array_agg(f.unit_cost ORDER BY d.calendar_date DESC,
+                            f.document_alegra_id DESC, f.line_number DESC)
+                   FILTER (WHERE f.unit_cost IS NOT NULL))[1] AS last_unit_cost,
+                 max(d.calendar_date) AS last_purchase_date
+          FROM fact_purchase_line f
+          JOIN dim_date d ON d.date_key = f.date_key
+          WHERE f.tenant_id = :tenant_id
+            AND f.is_deleted = false
+            AND f.product_key IS NOT NULL
+            AND f.provider_key IS NOT NULL
+            AND COALESCE(f.quantity, 0) > 0
+          GROUP BY f.tenant_id, f.product_key, f.provider_key,
+                   COALESCE(f.currency_code, :default_currency_code)
+        ), ranked AS (
+          SELECT supplier_stats.*,
+                 row_number() OVER (
+                   PARTITION BY product_key, currency_code
+                   ORDER BY purchase_line_count DESC,
+                            purchased_units DESC,
+                            purchased_amount DESC,
+                            last_purchase_date DESC NULLS LAST,
+                            supplier_key
+                 )::integer AS frequency_rank,
+                 row_number() OVER (
+                   PARTITION BY product_key, currency_code
+                   ORDER BY average_unit_cost ASC NULLS LAST,
+                            purchased_units DESC,
+                            last_purchase_date DESC NULLS LAST,
+                            supplier_key
+                 )::integer AS cost_rank,
+                 sum(purchase_line_count) OVER (
+                   PARTITION BY product_key, currency_code
+                 )::integer AS total_purchase_lines,
+                 sum(purchased_units) OVER (
+                   PARTITION BY product_key, currency_code
+                 ) AS total_purchased_units
+          FROM supplier_stats
+        )
+        INSERT INTO supplier_product_stats
+          (tenant_id, product_key, supplier_key, currency_code,
+           purchase_line_count, purchased_units, purchased_amount,
+           average_unit_cost, median_unit_cost, minimum_unit_cost,
+           maximum_unit_cost, last_unit_cost, last_purchase_date,
+           total_purchase_lines, total_purchased_units,
+           line_share_pct, unit_share_pct, frequency_rank, cost_rank)
+        SELECT tenant_id, product_key, supplier_key, currency_code,
+               purchase_line_count, purchased_units, purchased_amount,
+               average_unit_cost, median_unit_cost, minimum_unit_cost,
+               maximum_unit_cost, last_unit_cost, last_purchase_date,
+               total_purchase_lines, total_purchased_units,
+               purchase_line_count::numeric / NULLIF(total_purchase_lines, 0) * 100,
+               purchased_units / NULLIF(total_purchased_units, 0) * 100,
+               frequency_rank, cost_rank
+        FROM ranked
+        """
+    ),
 )

@@ -685,24 +685,38 @@ class AnalyticsQueryService:
         lead_time_days: int = 7,
         safety_days: int = 7,
         limit: int = 100,
+        review_status: str | None = None,
     ) -> dict[str, Any]:
-        """Return a review queue for replenishment, never an automatic order.
+        """Return an explainable replenishment queue grouped by supplier history.
 
-        Demand is net units sold during the selected period. The recommendation
-        fills stock up to ``target_coverage_days`` and marks urgency using the
-        lead time plus safety days. Items with no observed demand are excluded
-        so the queue does not turn dead stock into a purchase suggestion.
+        Demand uses the selected period for the recommendation and also exposes
+        7/30/90-day context. Supplier options come from the reusable mart
+        matrix, while review actions are persisted independently from each
+        recalculation of inventory and demand.
         """
         run = self._one(
             "SELECT id, finished_at FROM inventory_snapshot_runs "
             "WHERE tenant_id=:tenant_id AND status='succeeded' "
             "ORDER BY finished_at DESC LIMIT 1"
         )
+        parameters = {
+            "target_coverage_days": target_coverage_days,
+            "lead_time_days": lead_time_days,
+            "safety_days": safety_days,
+            "demand_from": filters.from_date,
+            "demand_to": filters.to_date,
+            "velocity_7_from": filters.to_date - timedelta(days=6),
+            "velocity_30_from": filters.to_date - timedelta(days=29),
+            "velocity_90_from": filters.to_date - timedelta(days=89),
+            "review_status": review_status,
+        }
         if run is None:
-            return {"snapshot_at": None, "parameters": {}, "items": []}
+            return {"snapshot_at": None, "parameters": parameters, "items": []}
 
+        demand_start = min(filters.from_date, filters.to_date - timedelta(days=89))
+        demand_filters = replace(filters, from_date=demand_start)
         demand_where, params = self._fact_where(
-            filters,
+            demand_filters,
             alias="s",
             allow_seller=True,
             allow_status=True,
@@ -717,13 +731,17 @@ class AnalyticsQueryService:
             stock_clauses.append("f.product_key = :product_key")
         if filters.warehouse_key is not None:
             stock_clauses.append("f.warehouse_key = :warehouse_key")
+        selected_days = (filters.to_date - filters.from_date).days + 1
         params.update(
             {
                 "snapshot_run_id": run["id"],
+                "selected_from": filters.from_date,
+                "selected_days": selected_days,
+                "recommendation_currency": (filters.currency or "COP").upper(),
                 "target_coverage_days": target_coverage_days,
                 "reorder_point_days": lead_time_days + safety_days,
-                "recommendation_currency": filters.currency or "COP",
                 "limit": limit,
+                "review_status": review_status,
             }
         )
         stock_where = " AND ".join(stock_clauses)
@@ -734,67 +752,157 @@ class AnalyticsQueryService:
               WHERE {stock_where}
               GROUP BY f.product_key
             ), demand AS (
-              SELECT s.product_key, sum(s.quantity) AS units_sold,
-                     sum(s.quantity) / NULLIF(:to_date - :from_date + 1, 0) AS daily_velocity
-              FROM fact_sales_line s JOIN dim_date d ON d.date_key = s.date_key
+              SELECT s.product_key,
+                     COALESCE(sum(s.quantity) FILTER (
+                       WHERE d.calendar_date BETWEEN :selected_from AND :to_date
+                     ), 0) AS units_selected,
+                     COALESCE(sum(s.quantity) FILTER (
+                       WHERE d.calendar_date >= :velocity_7_from
+                     ), 0) AS units_7d,
+                     COALESCE(sum(s.quantity) FILTER (
+                       WHERE d.calendar_date >= :velocity_30_from
+                     ), 0) AS units_30d,
+                     COALESCE(sum(s.quantity) FILTER (
+                       WHERE d.calendar_date >= :velocity_90_from
+                     ), 0) AS units_90d
+              FROM fact_sales_line s
+              JOIN dim_date d ON d.date_key = s.date_key
               WHERE {demand_where} AND s.product_key IS NOT NULL
               GROUP BY s.product_key
             ), purchase_cost AS (
               SELECT p.product_key,
                      sum(p.purchase_amount) / NULLIF(sum(p.quantity), 0) AS average_unit_cost
-              FROM fact_purchase_line p JOIN dim_date d ON d.date_key = p.date_key
-              WHERE p.tenant_id = :tenant_id AND p.is_deleted = false
-                AND d.calendar_date >= :from_date AND d.calendar_date <= :to_date
-                AND p.currency_code = :recommendation_currency
+              FROM fact_purchase_line p
+              JOIN dim_date d ON d.date_key = p.date_key
+              WHERE p.tenant_id = :tenant_id
+                AND p.is_deleted = false
+                AND d.calendar_date >= :selected_from
+                AND d.calendar_date <= :to_date
+                AND COALESCE(p.currency_code, :recommendation_currency) = :recommendation_currency
               GROUP BY p.product_key
-            ), supplier_spend AS (
-              SELECT p.product_key, p.provider_key, sum(p.purchase_amount) AS amount,
-                     row_number() OVER (PARTITION BY p.product_key ORDER BY sum(p.purchase_amount) DESC) AS supplier_rank
-              FROM fact_purchase_line p JOIN dim_date d ON d.date_key = p.date_key
-              WHERE p.tenant_id = :tenant_id AND p.is_deleted = false
-                AND d.calendar_date >= :from_date AND d.calendar_date <= :to_date
-                AND p.currency_code = :recommendation_currency AND p.provider_key IS NOT NULL
-              GROUP BY p.product_key, p.provider_key
+            ), supplier_ranked AS (
+              SELECT s.*, c.name AS supplier,
+                     row_number() OVER (
+                       PARTITION BY s.product_key, s.currency_code
+                       ORDER BY CASE WHEN s.frequency_rank = 1 THEN 0 ELSE 1 END,
+                                s.last_purchase_date DESC NULLS LAST,
+                                s.cost_rank,
+                                s.supplier_key
+                     ) AS recommendation_rank
+              FROM supplier_product_stats s
+              LEFT JOIN dim_contact c ON c.key = s.supplier_key
+              WHERE s.tenant_id = :tenant_id
+                AND s.currency_code = :recommendation_currency
+            ), supplier_choices AS (
+              SELECT product_key, currency_code,
+                     max(supplier_key) FILTER (WHERE recommendation_rank = 1) AS supplier_key,
+                     max(supplier) FILTER (WHERE recommendation_rank = 1) AS supplier,
+                     max(line_share_pct) FILTER (WHERE recommendation_rank = 1) AS confidence_pct,
+                     max(average_unit_cost) FILTER (WHERE recommendation_rank = 1) AS average_unit_cost,
+                     max(last_unit_cost) FILTER (WHERE recommendation_rank = 1) AS last_unit_cost,
+                     max(last_purchase_date) FILTER (WHERE recommendation_rank = 1) AS last_purchase_date,
+                     COALESCE(
+                       jsonb_agg(
+                         jsonb_build_object(
+                           'supplier_key', supplier_key,
+                           'supplier', COALESCE(supplier, 'Sin proveedor'),
+                           'is_modal', frequency_rank = 1,
+                           'confidence_pct', line_share_pct,
+                           'unit_share_pct', unit_share_pct,
+                           'purchase_lines', purchase_line_count,
+                           'average_unit_cost', average_unit_cost,
+                           'median_unit_cost', median_unit_cost,
+                           'minimum_unit_cost', minimum_unit_cost,
+                           'maximum_unit_cost', maximum_unit_cost,
+                           'last_unit_cost', last_unit_cost,
+                           'last_purchase_date', last_purchase_date
+                         ) ORDER BY recommendation_rank
+                       ) FILTER (WHERE recommendation_rank <= 3),
+                       '[]'::jsonb
+                     ) AS supplier_options
+              FROM supplier_ranked
+              GROUP BY product_key, currency_code
             ), candidates AS (
               SELECT p.key AS product_key, p.name, p.reference,
+                     COALESCE(p.family_name, 'SIN FAMILIA') AS family,
                      COALESCE(stock.quantity_on_hand, 0) AS quantity_on_hand,
-                     GREATEST(COALESCE(demand.units_sold, 0), 0) AS units_sold,
-                     GREATEST(COALESCE(demand.daily_velocity, 0), 0) AS daily_velocity,
-                     CASE WHEN COALESCE(demand.daily_velocity, 0) > 0
-                       THEN stock.quantity_on_hand / demand.daily_velocity END AS coverage_days,
-                     COALESCE(purchase_cost.average_unit_cost, p.current_cost, 0) AS unit_cost,
-                     COALESCE(supplier_spend.provider_key, 0) AS provider_key,
-                     CEIL(GREATEST(COALESCE(demand.daily_velocity, 0) * :target_coverage_days
-                       - COALESCE(stock.quantity_on_hand, 0), 0)) AS recommended_quantity
+                     GREATEST(COALESCE(demand.units_selected, 0), 0) AS units_sold,
+                     GREATEST(COALESCE(demand.units_7d, 0), 0) AS units_7d,
+                     GREATEST(COALESCE(demand.units_30d, 0), 0) AS units_30d,
+                     GREATEST(COALESCE(demand.units_90d, 0), 0) AS units_90d,
+                     GREATEST(COALESCE(demand.units_selected, 0), 0) /
+                       :selected_days AS daily_velocity,
+                     CASE
+                       WHEN GREATEST(COALESCE(demand.units_selected, 0), 0) > 0
+                       THEN COALESCE(stock.quantity_on_hand, 0) /
+                         (GREATEST(COALESCE(demand.units_selected, 0), 0) / :selected_days)
+                     END AS coverage_days,
+                     COALESCE(
+                       purchase_cost.average_unit_cost,
+                       supplier_choices.average_unit_cost,
+                       p.current_cost,
+                       0
+                     ) AS unit_cost,
+                     supplier_choices.supplier_key,
+                     COALESCE(
+                       supplier_choices.supplier,
+                       NULLIF(p.preferred_supplier_name, '')
+                     ) AS preferred_supplier,
+                     CASE
+                       WHEN supplier_choices.supplier IS NOT NULL THEN 'historial_modal'
+                       WHEN NULLIF(p.preferred_supplier_name, '') IS NOT NULL THEN 'catalogo_actual'
+                       ELSE 'sin_historial'
+                     END AS supplier_source,
+                     COALESCE(supplier_choices.confidence_pct, 0) AS supplier_confidence_pct,
+                     supplier_choices.average_unit_cost AS modal_average_unit_cost,
+                     supplier_choices.last_unit_cost,
+                     supplier_choices.last_purchase_date,
+                     COALESCE(supplier_choices.supplier_options, '[]'::jsonb) AS supplier_options,
+                     CEIL(GREATEST(
+                       GREATEST(COALESCE(demand.units_selected, 0), 0) /
+                         :selected_days * :target_coverage_days
+                         - COALESCE(stock.quantity_on_hand, 0),
+                       0
+                     )) AS recommended_quantity
               FROM dim_product p
               LEFT JOIN stock ON stock.product_key = p.key
               JOIN demand ON demand.product_key = p.key
               LEFT JOIN purchase_cost ON purchase_cost.product_key = p.key
-              LEFT JOIN supplier_spend
-                ON supplier_spend.product_key = p.key AND supplier_spend.supplier_rank = 1
-              WHERE p.tenant_id = :tenant_id AND p.is_deleted = false
+              LEFT JOIN supplier_choices
+                ON supplier_choices.product_key = p.key
+               AND supplier_choices.currency_code = :recommendation_currency
+              WHERE p.tenant_id = :tenant_id
+                AND p.is_deleted = false
                 AND (stock.product_key IS NOT NULL OR p.inventory_enabled IS TRUE)
             )
-            SELECT candidates.name AS product, candidates.reference,
-                   candidates.quantity_on_hand, candidates.units_sold, candidates.daily_velocity,
-                   round(candidates.coverage_days, 1) AS coverage_days,
-                   candidates.recommended_quantity, candidates.unit_cost,
-                   candidates.recommended_quantity * candidates.unit_cost AS estimated_purchase_value,
+            SELECT candidates.*,
                    :recommendation_currency AS currency_code,
-                   supplier.name AS preferred_supplier,
+                   COALESCE(actions.status, 'pending') AS review_status,
+                   actions.note AS review_note,
+                   actions.snoozed_until,
                    CASE
                      WHEN candidates.quantity_on_hand <= 0 THEN 'critical'
                      WHEN candidates.coverage_days < :reorder_point_days THEN 'high'
                      ELSE 'medium'
                    END AS priority,
                    CASE
-                     WHEN candidates.quantity_on_hand <= 0 THEN 'Agotado con demanda reciente'
-                     WHEN candidates.coverage_days < :reorder_point_days THEN 'La cobertura no alcanza el plazo de compra y seguridad'
+                     WHEN candidates.quantity_on_hand <= 0
+                       THEN 'Agotado con demanda reciente'
+                     WHEN candidates.preferred_supplier IS NULL
+                       THEN 'Reponer y validar proveedor antes de comprar'
+                     WHEN candidates.coverage_days < :reorder_point_days
+                       THEN 'La cobertura no alcanza el plazo de compra y seguridad'
                      ELSE 'La cobertura está por debajo del objetivo'
                    END AS reason
             FROM candidates
-            LEFT JOIN dim_contact supplier ON supplier.key = candidates.provider_key
+            LEFT JOIN replenishment_item_actions actions
+              ON actions.tenant_id = :tenant_id
+             AND actions.product_key = candidates.product_key
             WHERE candidates.recommended_quantity > 0
+              AND (
+                :review_status IS NULL
+                OR COALESCE(actions.status, 'pending') = :review_status
+              )
             ORDER BY CASE
                        WHEN candidates.quantity_on_hand <= 0 THEN 1
                        WHEN candidates.coverage_days < :reorder_point_days THEN 2
@@ -804,16 +912,140 @@ class AnalyticsQueryService:
             LIMIT :limit
         """
         params["target_coverage_days"] = target_coverage_days
-        return {
-            "snapshot_at": run["finished_at"],
-            "parameters": {
-                "target_coverage_days": target_coverage_days,
-                "lead_time_days": lead_time_days,
-                "safety_days": safety_days,
+        parameters.update(
+            {
                 "demand_from": filters.from_date,
                 "demand_to": filters.to_date,
-            },
+                "selected_days": selected_days,
+                "velocity_7_days": 7,
+                "velocity_30_days": 30,
+                "velocity_90_days": 90,
+            }
+        )
+        return {
+            "snapshot_at": run["finished_at"],
+            "parameters": parameters,
             "items": self._rows(statement, params),
+            **self._replenishment_opportunities(filters, run["id"]),
+        }
+
+    def _replenishment_opportunities(
+        self,
+        filters: AnalyticsFilters,
+        snapshot_run_id: Any,
+    ) -> dict[str, list[dict[str, Any]]]:
+        demand_start = min(filters.from_date, filters.to_date - timedelta(days=89))
+        demand_filters = replace(filters, from_date=demand_start)
+        demand_where, params = self._fact_where(
+            demand_filters,
+            alias="s",
+            allow_seller=True,
+            allow_status=True,
+            allow_warehouse=False,
+        )
+        params["snapshot_run_id"] = snapshot_run_id
+        rows = self._rows(
+            f"""
+            WITH stock AS (
+              SELECT f.product_key,
+                     sum(f.quantity_on_hand) AS quantity_on_hand,
+                     sum(f.inventory_value) AS inventory_value
+              FROM fact_inventory_snapshot f
+              WHERE f.tenant_id = :tenant_id
+                AND f.snapshot_run_id = :snapshot_run_id
+                AND f.product_key IS NOT NULL
+              GROUP BY f.product_key
+            ), demand AS (
+              SELECT s.product_key, COALESCE(sum(s.quantity), 0) AS units_90d
+              FROM fact_sales_line s
+              JOIN dim_date d ON d.date_key = s.date_key
+              WHERE {demand_where} AND s.product_key IS NOT NULL
+              GROUP BY s.product_key
+            ), opportunities AS (
+              SELECT p.key AS product_key, p.name, p.reference,
+                     COALESCE(p.family_name, 'SIN FAMILIA') AS family,
+                     stock.quantity_on_hand,
+                     GREATEST(COALESCE(demand.units_90d, 0), 0) AS units_90d,
+                     CASE
+                       WHEN GREATEST(COALESCE(demand.units_90d, 0), 0) > 0
+                       THEN stock.quantity_on_hand /
+                         (GREATEST(COALESCE(demand.units_90d, 0), 0) / 90)
+                     END AS coverage_days,
+                     stock.inventory_value,
+                     p.current_cost,
+                     CASE
+                       WHEN COALESCE(demand.units_90d, 0) <= 0 THEN 'slow'
+                       ELSE 'excess'
+                     END AS category
+              FROM stock
+              JOIN dim_product p ON p.key = stock.product_key
+              LEFT JOIN demand ON demand.product_key = stock.product_key
+              WHERE p.tenant_id = :tenant_id
+                AND p.is_deleted = false
+                AND stock.quantity_on_hand > 0
+                AND (
+                  COALESCE(demand.units_90d, 0) <= 0
+                  OR stock.quantity_on_hand /
+                    NULLIF(GREATEST(COALESCE(demand.units_90d, 0), 0) / 90, 0) >= 120
+                )
+            )
+            SELECT *
+            FROM opportunities
+            ORDER BY CASE WHEN category = 'slow' THEN 1 ELSE 2 END,
+                     inventory_value DESC NULLS LAST
+            LIMIT 200
+            """,
+            params,
+        )
+        return {
+            "excess_items": [row for row in rows if row["category"] == "excess"],
+            "slow_items": [row for row in rows if row["category"] == "slow"],
+        }
+
+    def update_replenishment_action(
+        self,
+        *,
+        product_key: int,
+        status: str,
+        note: str | None = None,
+        snoozed_until: date | None = None,
+    ) -> dict[str, Any]:
+        allowed = {"pending", "reviewed", "snoozed", "purchased", "discarded"}
+        if status not in allowed:
+            raise ValueError("Invalid replenishment status")
+        exists = self._one(
+            "SELECT key FROM dim_product WHERE tenant_id=:tenant_id AND key=:product_key "
+            "AND is_deleted=false",
+            {"product_key": product_key},
+        )
+        if exists is None:
+            raise LookupError("Product not found")
+        self._session.execute(
+            text(
+                """
+                INSERT INTO replenishment_item_actions
+                  (tenant_id, product_key, status, note, snoozed_until, updated_at)
+                VALUES
+                  (:tenant_id, :product_key, :status, :note, :snoozed_until, now())
+                ON CONFLICT (tenant_id, product_key) DO UPDATE SET
+                  status=EXCLUDED.status, note=EXCLUDED.note,
+                  snoozed_until=EXCLUDED.snoozed_until, updated_at=now()
+                """
+            ),
+            {
+                "tenant_id": self._tenant_id,
+                "product_key": product_key,
+                "status": status,
+                "note": note,
+                "snoozed_until": snoozed_until,
+            },
+        )
+        self._session.commit()
+        return {
+            "product_key": product_key,
+            "status": status,
+            "note": note,
+            "snoozed_until": snoozed_until,
         }
 
     def alerts(self) -> dict[str, Any]:

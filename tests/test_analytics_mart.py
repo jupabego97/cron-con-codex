@@ -49,6 +49,8 @@ def test_mart_queries_include_credit_notes_and_balanced_transfer_movements() -> 
     assert "product_supplier_modes" in derived
     assert "purchase_line_frequency" in derived
     assert "row_number()" in derived
+    assert "supplier_product_stats" in derived
+    assert "frequency_rank" in derived
 
 
 def test_mart_dimensions_are_loaded_from_operational_tables() -> None:

@@ -1,10 +1,13 @@
 """Authenticated, tenant-isolated read API for dashboard data."""
 
+import csv
+import io
 from datetime import date
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.dashboard import require_dashboard_session
@@ -132,6 +135,15 @@ def get_kpis(
     return service.kpis(filters)
 
 
+ReviewStatus = Literal["pending", "reviewed", "snoozed", "purchased", "discarded"]
+
+
+class ReplenishmentActionPayload(BaseModel):
+    status: ReviewStatus
+    note: str | None = Field(default=None, max_length=2000)
+    snoozed_until: date | None = None
+
+
 @router.get("/purchase-recommendations")
 def get_purchase_recommendations(
     filters: Annotated[AnalyticsFilters, Depends(build_filters)],
@@ -140,6 +152,7 @@ def get_purchase_recommendations(
     lead_time_days: Annotated[int, Query(ge=0, le=90)] = 7,
     safety_days: Annotated[int, Query(ge=0, le=90)] = 7,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    review_status: Annotated[ReviewStatus | None, Query()] = None,
 ) -> dict:
     return service.purchase_recommendations(
         filters,
@@ -147,7 +160,107 @@ def get_purchase_recommendations(
         lead_time_days=lead_time_days,
         safety_days=safety_days,
         limit=limit,
+        review_status=review_status,
     )
+
+
+@router.get("/purchase-recommendations/export")
+def export_purchase_recommendations(
+    filters: Annotated[AnalyticsFilters, Depends(build_filters)],
+    service: Annotated[AnalyticsQueryService, Depends(query_service)],
+    target_coverage_days: Annotated[int, Query(ge=7, le=365)] = 30,
+    lead_time_days: Annotated[int, Query(ge=0, le=90)] = 7,
+    safety_days: Annotated[int, Query(ge=0, le=90)] = 7,
+    review_status: Annotated[ReviewStatus | None, Query()] = None,
+) -> Response:
+    result = service.purchase_recommendations(
+        filters,
+        target_coverage_days=target_coverage_days,
+        lead_time_days=lead_time_days,
+        safety_days=safety_days,
+        limit=500,
+        review_status=review_status,
+    )
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "proveedor",
+            "fuente_proveedor",
+            "prioridad",
+            "estado",
+            "producto",
+            "referencia",
+            "familia",
+            "stock_actual",
+            "velocidad_7_dias",
+            "velocidad_30_dias",
+            "velocidad_90_dias",
+            "cobertura_dias",
+            "cantidad_sugerida",
+            "costo_unitario",
+            "valor_estimado",
+            "confianza_proveedor_pct",
+            "ultimo_costo",
+            "ultima_compra",
+            "motivo",
+            "nota",
+        ]
+    )
+    for item in result["items"]:
+        writer.writerow(
+            [
+                item.get("preferred_supplier") or "Sin proveedor",
+                item.get("supplier_source"),
+                item.get("priority"),
+                item.get("review_status"),
+                item.get("name"),
+                item.get("reference"),
+                item.get("family"),
+                item.get("quantity_on_hand"),
+                item.get("units_7d"),
+                item.get("units_30d"),
+                item.get("units_90d"),
+                item.get("coverage_days"),
+                item.get("recommended_quantity"),
+                item.get("unit_cost"),
+                (
+                    (item.get("recommended_quantity") or 0)
+                    * (item.get("unit_cost") or 0)
+                ),
+                item.get("supplier_confidence_pct"),
+                item.get("last_unit_cost"),
+                item.get("last_purchase_date"),
+                item.get("reason"),
+                item.get("review_note"),
+            ]
+        )
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": 'attachment; filename="reponer.csv"',
+        },
+    )
+
+
+@router.patch("/purchase-recommendations/{product_key}")
+def update_purchase_recommendation(
+    product_key: int,
+    payload: ReplenishmentActionPayload,
+    service: Annotated[AnalyticsQueryService, Depends(query_service)],
+) -> dict:
+    try:
+        return service.update_replenishment_action(
+            product_key=product_key,
+            status=payload.status,
+            note=payload.note,
+            snoozed_until=payload.snoozed_until,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @router.get("/alerts")
