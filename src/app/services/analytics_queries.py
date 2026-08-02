@@ -175,6 +175,8 @@ class AnalyticsQueryService:
                      COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
                      COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin,
                      COALESCE(sum(f.net_sales_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_sale,
+                     COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS costed_sales,
+                     count(*) AS total_lines,
                      count(*) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS costed_lines,
                      count(*) FILTER (WHERE f.cost_status = 'unavailable') AS unavailable_cost_lines,
                      max(d.calendar_date) AS last_sale_date
@@ -185,7 +187,8 @@ class AnalyticsQueryService:
               GROUP BY {group_by}, {currency}
             )
             SELECT aggregated.*,
-                   COALESCE(gross_margin / NULLIF(net_sales, 0) * 100, 0) AS gross_margin_pct,
+                   COALESCE(gross_margin / NULLIF(costed_sales, 0) * 100, 0) AS gross_margin_pct,
+                   COALESCE(costed_lines::numeric / NULLIF(total_lines, 0) * 100, 0) AS cost_coverage_pct,
                    COALESCE(net_sales / NULLIF(sum(net_sales) OVER (PARTITION BY currency_code), 0) * 100, 0) AS share_pct
             FROM aggregated
             ORDER BY net_sales DESC
