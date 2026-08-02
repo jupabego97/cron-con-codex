@@ -20,6 +20,8 @@ class AnalyticsFilters:
     seller_key: int | None = None
     warehouse_key: int | None = None
     document_status: str | None = None
+    family: str | None = None
+    provider_key: int | None = None
 
     @classmethod
     def default(cls) -> "AnalyticsFilters":
@@ -72,6 +74,25 @@ class AnalyticsQueryService:
             ),
             "sellers": self._dimension_options("dim_seller"),
             "warehouses": self._dimension_options("dim_warehouse"),
+            "families": self._rows(
+                """
+                SELECT DISTINCT family_name AS value, family_name AS label
+                FROM dim_product
+                WHERE tenant_id = :tenant_id AND is_deleted = false
+                  AND family_name IS NOT NULL
+                ORDER BY label
+                """
+            ),
+            "suppliers": self._rows(
+                """
+                SELECT DISTINCT c.key AS value, c.name AS label
+                FROM fact_purchase_line f
+                JOIN dim_contact c ON c.key = f.provider_key
+                WHERE f.tenant_id = :tenant_id AND f.is_deleted = false
+                  AND c.is_deleted = false
+                ORDER BY label
+                """
+            ),
             "document_statuses": self._rows(
                 """
                 SELECT DISTINCT document_status AS value FROM fact_sales_line
@@ -102,7 +123,9 @@ class AnalyticsQueryService:
         }
 
     def purchases(self, filters: AnalyticsFilters) -> dict[str, Any]:
-        where, params = self._fact_where(filters, alias="f", allow_seller=False, allow_status=True)
+        where, params = self._fact_where(
+            filters, alias="f", allow_seller=False, allow_status=True, allow_provider=True
+        )
         return {
             "summary": self._rows(
                 f"""
@@ -147,6 +170,143 @@ class AnalyticsQueryService:
             ),
         }
 
+    def suppliers(self, filters: AnalyticsFilters) -> dict[str, Any]:
+        """Supplier scorecard over real purchase-bill providers."""
+        where, params = self._fact_where(
+            filters,
+            alias="f",
+            allow_seller=False,
+            allow_status=True,
+            allow_provider=True,
+        )
+        currency = "COALESCE(f.currency_code, 'COP')"
+        return {
+            "summary": self._rows(
+                f"""
+                SELECT {currency} AS currency_code,
+                       COALESCE(sum(f.purchase_amount), 0) AS purchase_amount,
+                       COALESCE(sum(f.quantity), 0) AS units,
+                       count(DISTINCT f.document_alegra_id) AS documents,
+                       count(DISTINCT f.provider_key) AS suppliers,
+                       COALESCE(sum(f.purchase_amount) / NULLIF(count(DISTINCT f.document_alegra_id), 0), 0) AS average_purchase_ticket,
+                       COALESCE(sum(f.purchase_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_cost
+                FROM fact_purchase_line f JOIN dim_date d ON d.date_key = f.date_key
+                WHERE {where}
+                GROUP BY {currency}
+                ORDER BY currency_code
+                """,
+                params,
+            ),
+            "series": self._rows(
+                f"""
+                SELECT date_trunc('month', d.calendar_date)::date AS period,
+                       {currency} AS currency_code,
+                       COALESCE(sum(f.purchase_amount), 0) AS amount,
+                       COALESCE(sum(f.quantity), 0) AS units
+                FROM fact_purchase_line f JOIN dim_date d ON d.date_key = f.date_key
+                WHERE {where}
+                GROUP BY period, {currency}
+                ORDER BY period, currency_code
+                """,
+                params,
+            ),
+            "by_supplier": self._rows(
+                f"""
+                WITH filtered AS (
+                  SELECT f.*, {currency} AS report_currency
+                  FROM fact_purchase_line f JOIN dim_date d ON d.date_key = f.date_key
+                  WHERE {where}
+                ), totals AS (
+                  SELECT report_currency, sum(purchase_amount) AS total_amount
+                  FROM filtered GROUP BY report_currency
+                )
+                SELECT c.key AS supplier_key, COALESCE(c.name, 'Sin proveedor') AS supplier,
+                       x.report_currency AS currency_code,
+                       COALESCE(sum(x.purchase_amount), 0) AS purchase_amount,
+                       COALESCE(sum(x.quantity), 0) AS units,
+                       count(DISTINCT x.document_alegra_id) AS documents,
+                       count(DISTINCT x.product_key) AS skus,
+                       COALESCE(sum(x.purchase_amount) / NULLIF(count(DISTINCT x.document_alegra_id), 0), 0) AS average_purchase_ticket,
+                       COALESCE(sum(x.purchase_amount) / NULLIF(sum(x.quantity), 0), 0) AS average_unit_cost,
+                       COALESCE(sum(x.purchase_amount) / NULLIF(max(t.total_amount), 0) * 100, 0) AS share_pct,
+                       min(d.calendar_date) AS first_purchase_date,
+                       max(d.calendar_date) AS last_purchase_date
+                FROM filtered x
+                LEFT JOIN dim_contact c ON c.key = x.provider_key
+                JOIN dim_date d ON d.date_key = x.date_key
+                JOIN totals t ON t.report_currency = x.report_currency
+                GROUP BY c.key, c.name, x.report_currency
+                ORDER BY purchase_amount DESC
+                LIMIT 100
+                """,
+                params,
+            ),
+            "by_family": self._rows(
+                f"""
+                SELECT COALESCE(p.family_name, 'SIN FAMILIA') AS family,
+                       {currency} AS currency_code,
+                       COALESCE(sum(f.purchase_amount), 0) AS purchase_amount,
+                       COALESCE(sum(f.quantity), 0) AS units,
+                       count(DISTINCT f.provider_key) AS suppliers,
+                       count(DISTINCT f.product_key) AS skus
+                FROM fact_purchase_line f
+                JOIN dim_date d ON d.date_key = f.date_key
+                LEFT JOIN dim_product p ON p.key = f.product_key
+                WHERE {where}
+                GROUP BY family, {currency}
+                ORDER BY purchase_amount DESC
+                LIMIT 100
+                """,
+                params,
+            ),
+            "by_product_supplier": self._rows(
+                f"""
+                SELECT COALESCE(p.name, 'Sin producto') AS product,
+                       COALESCE(p.family_name, 'SIN FAMILIA') AS family,
+                       COALESCE(c.name, 'Sin proveedor') AS supplier,
+                       {currency} AS currency_code,
+                       COALESCE(sum(f.purchase_amount), 0) AS purchase_amount,
+                       COALESCE(sum(f.quantity), 0) AS units,
+                       COALESCE(sum(f.purchase_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_cost,
+                       count(DISTINCT f.document_alegra_id) AS documents,
+                       max(d.calendar_date) AS last_purchase_date
+                FROM fact_purchase_line f
+                JOIN dim_date d ON d.date_key = f.date_key
+                LEFT JOIN dim_product p ON p.key = f.product_key
+                LEFT JOIN dim_contact c ON c.key = f.provider_key
+                WHERE {where}
+                GROUP BY product, family, supplier, {currency}
+                ORDER BY purchase_amount DESC
+                LIMIT 200
+                """,
+                params,
+            ),
+            "price_variations": self._rows(
+                f"""
+                SELECT COALESCE(p.name, 'Sin producto') AS product,
+                       COALESCE(p.family_name, 'SIN FAMILIA') AS family,
+                       COALESCE(c.name, 'Sin proveedor') AS supplier,
+                       {currency} AS currency_code,
+                       min(f.unit_cost) AS minimum_cost,
+                       max(f.unit_cost) AS maximum_cost,
+                       avg(f.unit_cost) AS average_unit_cost,
+                       COALESCE((max(f.unit_cost) - min(f.unit_cost)) /
+                         NULLIF(avg(f.unit_cost), 0) * 100, 0) AS cost_range_pct,
+                       count(*) AS purchase_lines
+                FROM fact_purchase_line f
+                JOIN dim_date d ON d.date_key = f.date_key
+                LEFT JOIN dim_product p ON p.key = f.product_key
+                LEFT JOIN dim_contact c ON c.key = f.provider_key
+                WHERE {where} AND f.unit_cost IS NOT NULL AND f.unit_cost > 0
+                GROUP BY product, family, supplier, {currency}
+                HAVING count(*) >= 2
+                ORDER BY cost_range_pct DESC
+                LIMIT 100
+                """,
+                params,
+            ),
+        }
+
     def payments(self, filters: AnalyticsFilters) -> dict[str, Any]:
         where, params = self._fact_where(
             filters,
@@ -155,6 +315,7 @@ class AnalyticsQueryService:
             allow_status=False,
             allow_product=False,
             allow_warehouse=False,
+            allow_family=False,
         )
         return {
             "summary": self._rows(
@@ -838,6 +999,8 @@ class AnalyticsQueryService:
         allow_currency: bool = True,
         allow_product: bool = True,
         allow_warehouse: bool = True,
+        allow_provider: bool = False,
+        allow_family: bool = True,
     ) -> tuple[str, dict[str, Any]]:
         clauses = [
             f"{alias}.tenant_id = :tenant_id",
@@ -856,11 +1019,20 @@ class AnalyticsQueryService:
             ("seller_key", filters.seller_key, allow_seller),
             ("warehouse_key", filters.warehouse_key, allow_warehouse),
             ("document_status", filters.document_status, allow_status),
+            ("provider_key", filters.provider_key, allow_provider),
         ):
             if value is not None and allowed:
                 parameter = column
                 clauses.append(f"{alias}.{column} = :{parameter}")
                 params[parameter] = value
+        if filters.family is not None and allow_family:
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM dim_product family_product "
+                f"WHERE family_product.key = {alias}.product_key "
+                "AND family_product.tenant_id = :tenant_id "
+                "AND COALESCE(family_product.family_name, 'SIN FAMILIA') = :family)"
+            )
+            params["family"] = filters.family
         return " AND ".join(clauses), params
 
     def _dimension_options(self, table: str) -> list[dict[str, Any]]:

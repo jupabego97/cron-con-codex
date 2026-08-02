@@ -114,8 +114,11 @@ Las líneas sin cobertura no reciben un costo inventado: quedan visibles como
 ## Dashboard interno
 
 El dashboard React se sirve desde la misma URL del API. Configura
-`DASHBOARD_PASSWORD` y `DASHBOARD_TENANT_ID` en el servicio API, despliega y
-abre su dominio público. Consulta `docs/architecture/phase-5-dashboard.md`.
+`DASHBOARD_PASSWORD`, `DASHBOARD_TENANT_ID` y, si aplica, `ANALYTICS_DEFAULT_CURRENCY_CODE`
+en el servicio API, despliega y abre su dominio público. Después de la migración,
+ejecuta `python -m app.cli refresh-mart <tenant-uuid>` para proyectar familias y
+moneda en el mart. Consulta `docs/architecture/phase-5-dashboard.md` y
+`docs/architecture/phase-7-families-suppliers.md`.
 
 ## Documentación
 
@@ -124,3 +127,4 @@ abre su dominio público. Consulta `docs/architecture/phase-5-dashboard.md`.
 - [Fase 1: sincronización de facturas](docs/architecture/phase-1-invoice-sync.md)
 - [Fase 2: webhooks y reconciliación](docs/architecture/phase-2-webhooks-reconciliation.md)
 - [Fase 3: operación local controlada](docs/architecture/phase-3-local-operation.md)
+- [Fase 7: familias y proveedores](docs/architecture/phase-7-families-suppliers.md)

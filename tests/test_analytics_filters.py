@@ -15,6 +15,13 @@ def test_previous_period_has_the_same_length() -> None:
     )
 
 
+def test_build_filters_accepts_family_and_supplier_filters() -> None:
+    filters = build_filters(family="GAMING", provider_key=12)
+
+    assert filters.family == "GAMING"
+    assert filters.provider_key == 12
+
+
 def test_date_filter_rejects_an_inverted_range() -> None:
     with pytest.raises(HTTPException, match="from_date"):
         build_filters(from_date=date(2026, 7, 31), to_date=date(2026, 7, 1))

@@ -25,8 +25,9 @@ class MartRefreshResult:
 
 
 class AnalyticsMartService:
-    def __init__(self, *, session: Session) -> None:
+    def __init__(self, *, session: Session, default_currency_code: str = "COP") -> None:
         self._session = session
+        self._default_currency_code = default_currency_code.strip().upper() or "COP"
 
     def refresh(self, *, tenant_id: uuid.UUID) -> MartRefreshResult:
         """Rebuild one tenant's facts from its typed operational projections."""
@@ -39,14 +40,18 @@ class AnalyticsMartService:
                 text("SELECT pg_advisory_xact_lock(hashtext(CAST(:tenant_id AS text)))"),
                 {"tenant_id": str(tenant_id)},
             )
+            params = {
+                "tenant_id": tenant_id,
+                "default_currency_code": self._default_currency_code,
+            }
             written = sum(
-                max(int(self._session.execute(statement, {"tenant_id": tenant_id}).rowcount or 0), 0)
+                max(int(self._session.execute(statement, params).rowcount or 0), 0)
                 for statement in _DIMENSIONS
             )
             for statement in _DELETE_FACTS:
-                self._session.execute(statement, {"tenant_id": tenant_id})
+                self._session.execute(statement, params)
             written += sum(
-                max(int(self._session.execute(statement, {"tenant_id": tenant_id}).rowcount or 0), 0)
+                max(int(self._session.execute(statement, params).rowcount or 0), 0)
                 for statement in _FACTS
             )
             run.status = "succeeded"
@@ -77,16 +82,18 @@ _DIMENSIONS = (
         """
         INSERT INTO dim_product
             (tenant_id, alegra_id, source_hash, is_deleted, name, reference, item_type,
-             status, inventory_enabled, unit, base_price, current_cost, updated_at)
+             status, inventory_enabled, unit, base_price, current_cost, family_name, updated_at)
         SELECT tenant_id, alegra_id, source_hash, is_deleted, name, reference, item_type,
-               status, inventory_enabled, unit, base_price, cost, now()
+               status, inventory_enabled, unit, base_price, cost,
+               COALESCE(NULLIF(family_name, ''), 'SIN FAMILIA'), now()
         FROM catalog_items WHERE tenant_id = :tenant_id
         ON CONFLICT (tenant_id, alegra_id) DO UPDATE SET
           source_hash = EXCLUDED.source_hash, is_deleted = EXCLUDED.is_deleted,
           name = EXCLUDED.name, reference = EXCLUDED.reference, item_type = EXCLUDED.item_type,
           status = EXCLUDED.status, inventory_enabled = EXCLUDED.inventory_enabled,
           unit = EXCLUDED.unit, base_price = EXCLUDED.base_price,
-          current_cost = EXCLUDED.current_cost, updated_at = now()
+          current_cost = EXCLUDED.current_cost, family_name = EXCLUDED.family_name,
+          updated_at = now()
         """
     ),
     text(
@@ -210,7 +217,7 @@ _FACTS = (
            quantity, unit_cost, purchase_amount, is_deleted)
         SELECT pb.tenant_id, dt.key, to_char(pb.issue_date, 'YYYYMMDD')::integer,
                dp.key, dc.key, NULL, pb.alegra_id, pb.document_number, pb.status,
-               pbl.line_number, pb.currency_code, COALESCE(pbl.quantity, 0), pbl.unit_price,
+               pbl.line_number, COALESCE(pb.currency_code, :default_currency_code), COALESCE(pbl.quantity, 0), pbl.unit_price,
                COALESCE(pbl.line_total, 0), pb.is_deleted
         FROM purchase_bills pb
         JOIN purchase_bill_lines pbl

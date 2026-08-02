@@ -23,6 +23,8 @@ def build_filters(
     seller_key: Annotated[int | None, Query(ge=1)] = None,
     warehouse_key: Annotated[int | None, Query(ge=1)] = None,
     document_status: Annotated[str | None, Query(max_length=30)] = None,
+    family: Annotated[str | None, Query(max_length=120)] = None,
+    provider_key: Annotated[int | None, Query(ge=1)] = None,
 ) -> AnalyticsFilters:
     defaults = AnalyticsFilters.default()
     result = AnalyticsFilters(
@@ -33,6 +35,8 @@ def build_filters(
         seller_key=seller_key,
         warehouse_key=warehouse_key,
         document_status=document_status,
+        family=family,
+        provider_key=provider_key,
     )
     if result.from_date > result.to_date:
         raise HTTPException(status_code=422, detail="from_date must not be after to_date")
@@ -78,6 +82,14 @@ def get_purchases(
     service: Annotated[AnalyticsQueryService, Depends(query_service)],
 ) -> dict:
     return service.purchases(filters)
+
+
+@router.get("/suppliers")
+def get_suppliers(
+    filters: Annotated[AnalyticsFilters, Depends(build_filters)],
+    service: Annotated[AnalyticsQueryService, Depends(query_service)],
+) -> dict:
+    return service.suppliers(filters)
 
 
 @router.get("/payments")

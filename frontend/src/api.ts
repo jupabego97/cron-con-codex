@@ -7,6 +7,8 @@ export type Filters = {
   seller_key?: string;
   warehouse_key?: string;
   document_status?: string;
+  family?: string;
+  provider_key?: string;
 };
 
 const apiBase = "/api/v1";

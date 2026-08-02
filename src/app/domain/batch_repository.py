@@ -450,6 +450,7 @@ def _projection_fields(resource: str, payload: dict[str, Any], external_id: str)
             "unit": _unit(payload.get("unit")),
             "base_price": _decimal(payload.get("price")),
             "cost": _decimal(payload.get("cost")),
+            "family_name": _custom_field_value(payload, "FAMILIA"),
         }
     if resource == "warehouse":
         return {
@@ -632,6 +633,21 @@ def _currency_code(value: Any) -> str | None:
     if isinstance(value, dict):
         return _text(value.get("code"))
     return _text(value)
+
+
+def _custom_field_value(payload: dict[str, Any], field_name: str) -> str | None:
+    """Read an Alegra custom field by its configured display name."""
+    custom_fields = payload.get("customFields")
+    if not isinstance(custom_fields, list):
+        return None
+    expected = field_name.strip().casefold()
+    for field in custom_fields:
+        if not isinstance(field, dict):
+            continue
+        names = (field.get("name"), field.get("label"), field.get("key"))
+        if any(_text(name) and _text(name).strip().casefold() == expected for name in names):
+            return _text(field.get("value"))
+    return None
 
 
 def _document_number(payload: dict[str, Any]) -> str | None:

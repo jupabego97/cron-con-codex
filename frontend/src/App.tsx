@@ -14,7 +14,7 @@ import {
 import { api, Filters, Option, query } from "./api";
 import { money, number } from "./format";
 
-type Tab = "overview" | "sales" | "purchases" | "payments" | "customers" | "products" | "kpis" | "purchase-recommendations" | "inventory" | "alerts";
+type Tab = "overview" | "sales" | "purchases" | "suppliers" | "payments" | "customers" | "products" | "kpis" | "purchase-recommendations" | "inventory" | "alerts";
 type Row = Record<string, string | number | null>;
 type FilterData = {
   date_range: { min_date?: string; max_date?: string };
@@ -22,6 +22,8 @@ type FilterData = {
   products: Option[];
   sellers: Option[];
   warehouses: Option[];
+  families: Option[];
+  suppliers: Option[];
   document_statuses: Option[];
 };
 type Overview = { current: Row[]; previous: Row[]; series: Row[] };
@@ -30,6 +32,7 @@ const tabs: Array<[Tab, string]> = [
   ["overview", "Resumen"],
   ["sales", "Ventas"],
   ["purchases", "Compras"],
+  ["suppliers", "Proveedores"],
   ["payments", "Pagos"],
   ["customers", "Clientes"],
   ["products", "Productos"],
@@ -171,6 +174,8 @@ function FiltersBar({ filters, setFilters, options }: { filters: Filters; setFil
       <Select label="Producto" value={filters.product_key} options={options?.products} onChange={(value) => update("product_key", value)} />
       <Select label="Vendedor" value={filters.seller_key} options={options?.sellers} onChange={(value) => update("seller_key", value)} />
       <Select label="Bodega" value={filters.warehouse_key} options={options?.warehouses} onChange={(value) => update("warehouse_key", value)} />
+      <Select label="Familia" value={filters.family} options={options?.families} onChange={(value) => update("family", value)} />
+      <Select label="Proveedor" value={filters.provider_key} options={options?.suppliers} onChange={(value) => update("provider_key", value)} />
       <Select label="Estado" value={filters.document_status} options={options?.document_statuses} onChange={(value) => update("document_status", value)} />
     </section>
   );
@@ -192,6 +197,7 @@ function DashboardTab({ tab, data }: { tab: Tab; data: Record<string, unknown> |
   if (tab === "overview") return <Overview data={data as unknown as Overview} />;
   if (tab === "sales") return <DomainView title="Ventas" data={data} amountKey="amount" />;
   if (tab === "purchases") return <DomainView title="Compras" data={data} amountKey="amount" />;
+  if (tab === "suppliers") return <SupplierReports data={data} />;
   if (tab === "payments") return <DomainView title="Pagos" data={data} amountKey="amount" />;
   if (tab === "customers") return <DomainView title="Clientes" data={data} amountKey="amount" />;
   if (tab === "products") return <DomainView title="Productos y rotaciÃ³n" data={data} amountKey="amount" />;
@@ -297,6 +303,33 @@ function PurchaseRecommendations({ data }: { data: Record<string, unknown> }) {
   </>;
 }
 
+function SupplierReports({ data }: { data: Record<string, unknown> }) {
+  const summary = (data.summary || []) as Row[];
+  const suppliers = (data.by_supplier || []) as Row[];
+  const families = (data.by_family || []) as Row[];
+  const products = (data.by_product_supplier || []) as Row[];
+  const variations = (data.price_variations || []) as Row[];
+  const familyChart = families.map((row) => ({ ...row, label: row.family }));
+  return <>
+    <h2>Proveedores</h2>
+    <p className="muted">El proveedor se toma de la factura de compra. La familia se toma del campo FAMILIA del producto.</p>
+    <section className="cards">{summary.map((row) => {
+      const currency = String(row.currency_code || "COP");
+      return <article className="metric-card" key={currency}>
+        <p>{currency} · Compra acumulada</p><strong>{money(row.purchase_amount, currency)}</strong>
+        <small>{number(row.suppliers)} proveedores · {number(row.documents)} documentos</small>
+        <dl><div><dt>Unidades</dt><dd>{number(row.units)}</dd></div><div><dt>Ticket promedio</dt><dd>{money(row.average_purchase_ticket, currency)}</dd></div><div><dt>Costo unitario</dt><dd>{money(row.average_unit_cost, currency)}</dd></div></dl>
+      </article>;
+    })}</section>
+    <Chart title="Compras en el tiempo" data={(data.series || []) as Row[]} dataKey="amount" moneyValue />
+    <Chart title="Compra por familia" data={familyChart} dataKey="purchase_amount" moneyValue />
+    <section className="table-card"><h3>Ranking de proveedores</h3>{suppliers.length ? <table><thead><tr><th>Proveedor</th><th>Compra</th><th>Participación</th><th>Unidades</th><th>Documentos</th><th>SKUs</th><th>Última compra</th></tr></thead><tbody>{suppliers.map((row, index) => <tr key={`${row.supplier}-${index}`}><td>{String(row.supplier)}</td><td>{money(row.purchase_amount, String(row.currency_code || "COP"))}</td><td>{percent(row.share_pct)}</td><td>{number(row.units)}</td><td>{number(row.documents)}</td><td>{number(row.skus)}</td><td>{String(row.last_purchase_date || "")}</td></tr>)}</tbody></table> : <p className="muted">Sin compras para estos filtros.</p>}</section>
+    <section className="table-card"><h3>Compras por familia</h3>{families.length ? <table><thead><tr><th>Familia</th><th>Compra</th><th>Unidades</th><th>Proveedores</th><th>SKUs</th></tr></thead><tbody>{families.map((row, index) => <tr key={`${row.family}-${index}`}><td>{String(row.family)}</td><td>{money(row.purchase_amount, String(row.currency_code || "COP"))}</td><td>{number(row.units)}</td><td>{number(row.suppliers)}</td><td>{number(row.skus)}</td></tr>)}</tbody></table> : <p className="muted">Sin familias para estos filtros.</p>}</section>
+    <section className="table-card"><h3>Matriz producto–proveedor</h3>{products.length ? <table><thead><tr><th>Producto</th><th>Familia</th><th>Proveedor</th><th>Compra</th><th>Unidades</th><th>Costo promedio</th><th>Última compra</th></tr></thead><tbody>{products.slice(0, 100).map((row, index) => <tr key={`${row.product}-${row.supplier}-${index}`}><td>{String(row.product)}</td><td>{String(row.family)}</td><td>{String(row.supplier)}</td><td>{money(row.purchase_amount, String(row.currency_code || "COP"))}</td><td>{number(row.units)}</td><td>{money(row.average_unit_cost, String(row.currency_code || "COP"))}</td><td>{String(row.last_purchase_date || "")}</td></tr>)}</tbody></table> : <p className="muted">Sin detalle producto–proveedor.</p>}</section>
+    <section className="table-card"><h3>Variación de costos</h3><p className="muted">Productos con al menos dos compras y diferencia entre costo mínimo y máximo.</p>{variations.length ? <table><thead><tr><th>Producto</th><th>Familia</th><th>Proveedor</th><th>Costo mínimo</th><th>Costo máximo</th><th>Variación</th><th>Compras</th></tr></thead><tbody>{variations.map((row, index) => <tr key={`${row.product}-${row.supplier}-${index}`}><td>{String(row.product)}</td><td>{String(row.family)}</td><td>{String(row.supplier)}</td><td>{money(row.minimum_cost, String(row.currency_code || "COP"))}</td><td>{money(row.maximum_cost, String(row.currency_code || "COP"))}</td><td>{percent(row.cost_range_pct)}</td><td>{number(row.purchase_lines)}</td></tr>)}</tbody></table> : <p className="muted">No hay variaciones suficientes para estos filtros.</p>}</section>
+  </>;
+}
+
 function DomainView({ title, data, amountKey }: { title: string; data: Record<string, unknown>; amountKey: string }) {
   const summary = (data.summary || []) as Row[];
   const series = (data.series || []) as Row[];
@@ -333,5 +366,5 @@ function Chart({ title, data, dataKey, moneyValue = false }: { title: string; da
 }
 
 function labelFor(value: string): string {
-  return ({ by_product: "Por producto", best_sellers: "MÃ¡s vendidos", stock_coverage: "Cobertura de stock", recent_customers: "Clientes recientes", by_supplier: "Por proveedor", by_type: "Por tipo", by_contact: "Por contacto", by_seller: "Por vendedor", by_warehouse: "Por bodega", by_customer: "Por cliente", by_status: "Por estado", adjustment: "Ajustes", transfer_in: "Entradas por transferencia", transfer_out: "Salidas por transferencia" }[value] || value).replaceAll("_", " ");
+  return ({ by_product: "Por producto", best_sellers: "MÃ¡s vendidos", stock_coverage: "Cobertura de stock", recent_customers: "Clientes recientes", by_supplier: "Por proveedor", by_family: "Por familia", by_type: "Por tipo", by_contact: "Por contacto", by_seller: "Por vendedor", by_warehouse: "Por bodega", by_customer: "Por cliente", by_status: "Por estado", adjustment: "Ajustes", transfer_in: "Entradas por transferencia", transfer_out: "Salidas por transferencia" }[value] || value).replaceAll("_", " ");
 }

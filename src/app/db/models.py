@@ -231,6 +231,7 @@ class CatalogItem(SourceProjectionMixin, Base):
     unit: Mapped[str | None] = mapped_column(String(100))
     base_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    family_name: Mapped[str | None] = mapped_column(String(120))
 
 
 class Warehouse(SourceProjectionMixin, Base):

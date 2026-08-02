@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     dashboard_password: SecretStr | None = None
     dashboard_tenant_id: UUID | None = None
     dashboard_monthly_sales_target_cop: Decimal | None = None
+    analytics_default_currency_code: str = "COP"
 
     @model_validator(mode="after")
     def require_production_secrets(self) -> "Settings":

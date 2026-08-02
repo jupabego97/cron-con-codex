@@ -219,7 +219,10 @@ async def backfill_all(
 
 def refresh_mart(*, tenant_id: uuid.UUID) -> None:
     with get_session_factory()() as session:
-        result = AnalyticsMartService(session=session).refresh(tenant_id=tenant_id)
+        result = AnalyticsMartService(
+            session=session,
+            default_currency_code=get_settings().analytics_default_currency_code,
+        ).refresh(tenant_id=tenant_id)
         costs = HistoricalSalesCostService(session=session).allocate(tenant_id=tenant_id)
     print(
         f"mart={result.run_id} {result.status} written={result.records_written} "
