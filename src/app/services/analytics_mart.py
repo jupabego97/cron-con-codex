@@ -54,6 +54,10 @@ class AnalyticsMartService:
                 max(int(self._session.execute(statement, params).rowcount or 0), 0)
                 for statement in _FACTS
             )
+            written += sum(
+                max(int(self._session.execute(statement, params).rowcount or 0), 0)
+                for statement in _DERIVED
+            )
             run.status = "succeeded"
             run.records_written = written
             run.finished_at = datetime.now(UTC)
@@ -310,6 +314,56 @@ _FACTS = (
         LEFT JOIN dim_warehouse destination_dw
           ON destination_dw.tenant_id = wt.tenant_id AND destination_dw.alegra_id = wt.destination_warehouse_alegra_id
         WHERE wt.tenant_id = :tenant_id
+        """
+    ),
+)
+
+_DERIVED = (
+    text("DELETE FROM product_supplier_modes WHERE tenant_id = :tenant_id"),
+    text(
+        """
+        WITH supplier_stats AS (
+          SELECT f.tenant_id, f.product_key, f.provider_key,
+                 count(*)::integer AS purchase_line_count,
+                 COALESCE(sum(f.quantity), 0) AS purchased_units,
+                 COALESCE(sum(f.purchase_amount), 0) AS purchased_amount,
+                 max(d.calendar_date) AS last_purchase_date
+          FROM fact_purchase_line f
+          JOIN dim_date d ON d.date_key = f.date_key
+          WHERE f.tenant_id = :tenant_id
+            AND f.is_deleted = false
+            AND f.product_key IS NOT NULL
+            AND f.provider_key IS NOT NULL
+          GROUP BY f.tenant_id, f.product_key, f.provider_key
+        ), ranked AS (
+          SELECT supplier_stats.*,
+                 row_number() OVER (
+                   PARTITION BY product_key
+                   ORDER BY purchase_line_count DESC,
+                            purchased_units DESC,
+                            purchased_amount DESC,
+                            last_purchase_date DESC NULLS LAST,
+                            provider_key
+                 ) AS supplier_rank,
+                 sum(purchase_line_count) OVER (
+                   PARTITION BY product_key
+                 )::integer AS total_purchase_lines,
+                 count(*) OVER (
+                   PARTITION BY product_key
+                 )::integer AS supplier_count
+          FROM supplier_stats
+        )
+        INSERT INTO product_supplier_modes
+          (tenant_id, product_key, supplier_key, mode_method,
+           purchase_line_count, purchased_units, purchased_amount,
+           total_purchase_lines, supplier_count, confidence, last_purchase_date)
+        SELECT tenant_id, product_key, provider_key, 'purchase_line_frequency',
+               purchase_line_count, purchased_units, purchased_amount,
+               total_purchase_lines, supplier_count,
+               purchase_line_count::numeric / NULLIF(total_purchase_lines, 0),
+               last_purchase_date
+        FROM ranked
+        WHERE supplier_rank = 1
         """
     ),
 )

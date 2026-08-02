@@ -132,6 +132,7 @@ class AnalyticsQueryService:
                 dimension_select="COALESCE(NULLIF(p.preferred_supplier_name, ''), 'SIN PROVEEDOR') AS supplier",
                 group_by="COALESCE(NULLIF(p.preferred_supplier_name, ''), 'SIN PROVEEDOR')",
             ),
+            "modal_supplier_detail": self._sales_modal_supplier_detail(filters),
             "cost_supplier_detail": self._sales_cost_supplier_detail(filters),
             "product_detail": self._sales_detail(
                 filters,
@@ -201,6 +202,59 @@ class AnalyticsQueryService:
             FROM aggregated
             ORDER BY net_sales DESC
             LIMIT 200
+            """,
+            params,
+        )
+
+    def _sales_modal_supplier_detail(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        """Group sales by each product's historical modal purchase supplier.
+
+        The mode is calculated from purchase-line frequency in the mart. The
+        confidence shown at supplier level is the absolute-sales-weighted
+        average confidence across the products assigned to that supplier.
+        """
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        return self._rows(
+            f"""
+            WITH aggregated AS (
+              SELECT COALESCE(c.name, 'SIN HISTORIAL DE PROVEEDOR') AS supplier,
+                     COALESCE(f.currency_code, 'COP') AS currency_code,
+                     COALESCE(sum(f.net_sales_amount), 0) AS net_sales,
+                     COALESCE(sum(f.quantity), 0) AS units,
+                     count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
+                     COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'invoice'), 0) AS invoice_sales,
+                     abs(COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'credit_note'), 0)) AS credit_note_amount,
+                     COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
+                     COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin,
+                     COALESCE(sum(f.net_sales_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_sale,
+                     COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS costed_sales,
+                     count(*) AS total_lines,
+                     count(*) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS costed_lines,
+                     count(*) FILTER (WHERE f.cost_status = 'unavailable') AS unavailable_cost_lines,
+                     count(DISTINCT f.product_key) AS product_count,
+                     COALESCE(
+                       sum(abs(f.net_sales_amount) * COALESCE(psm.confidence, 0)) /
+                       NULLIF(sum(abs(f.net_sales_amount)), 0) * 100,
+                       0
+                     ) AS supplier_confidence_pct,
+                     max(d.calendar_date) AS last_sale_date
+              FROM fact_sales_line f
+              JOIN dim_date d ON d.date_key = f.date_key
+              LEFT JOIN product_supplier_modes psm
+                ON psm.tenant_id = f.tenant_id
+               AND psm.product_key = f.product_key
+              LEFT JOIN dim_contact c ON c.key = psm.supplier_key
+              WHERE {where}
+              GROUP BY COALESCE(c.name, 'SIN HISTORIAL DE PROVEEDOR'),
+                       COALESCE(f.currency_code, 'COP')
+            )
+            SELECT aggregated.*,
+                   COALESCE(gross_margin / NULLIF(costed_sales, 0) * 100, 0) AS gross_margin_pct,
+                   COALESCE(costed_lines::numeric / NULLIF(total_lines, 0) * 100, 0) AS cost_coverage_pct,
+                   COALESCE(net_sales / NULLIF(sum(net_sales) OVER (PARTITION BY currency_code), 0) * 100, 0) AS share_pct
+            FROM aggregated
+            ORDER BY net_sales DESC
+            LIMIT 100
             """,
             params,
         )

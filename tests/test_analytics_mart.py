@@ -1,5 +1,5 @@
 from app.cli import build_parser
-from app.services.analytics_mart import _DIMENSIONS, _FACTS
+from app.services.analytics_mart import _DERIVED, _DIMENSIONS, _FACTS
 
 
 def test_refresh_mart_is_available_as_a_tenant_scoped_command() -> None:
@@ -45,6 +45,10 @@ def test_mart_queries_include_credit_notes_and_balanced_transfer_movements() -> 
     dimensions = "\n".join(str(statement) for statement in _DIMENSIONS)
     assert "family_name" in dimensions
     assert "preferred_supplier_name" in dimensions
+    derived = "\n".join(str(statement) for statement in _DERIVED)
+    assert "product_supplier_modes" in derived
+    assert "purchase_line_frequency" in derived
+    assert "row_number()" in derived
 
 
 def test_mart_dimensions_are_loaded_from_operational_tables() -> None:

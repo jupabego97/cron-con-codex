@@ -38,3 +38,12 @@ La vista de Ventas expone dos atribuciones con significados distintos:
 La primera vista sirve para decisiones comerciales y de portafolio; la segunda
 sirve para margen y rentabilidad de abastecimiento. No se deben sumar ni
 interpretar como una única dimensión histórica.
+
+
+- **Proveedor modal histórico** asigna cada producto al proveedor que aparece con
+  mayor frecuencia en sus líneas de compra históricas. Los empates se resuelven
+  por unidades, valor comprado y fecha más reciente. La tabla
+  product_supplier_modes conserva la evidencia, el método y la confianza de
+  cada asignación; la vista de Ventas usa esta proyección para responder qué
+  proveedores están asociados a los productos que más se venden. Los productos
+  sin compras históricas quedan como SIN HISTORIAL DE PROVEEDOR.
