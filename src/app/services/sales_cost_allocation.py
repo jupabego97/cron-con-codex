@@ -7,7 +7,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from sqlalchemy import text
@@ -544,7 +544,7 @@ class HistoricalSalesCostService:
             costed_rows.append(allocation)
             sequence += 1
         if costed_rows:
-            rounded_total = summary.cogs_amount.quantize(Decimal("0.01"))
+            rounded_total = summary.cogs_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             previous_total = sum(
                 (row["cost_amount"] for row in costed_rows[:-1]), Decimal("0")
             )
@@ -637,7 +637,7 @@ class HistoricalSalesCostService:
                 sequence=0,
                 quantity=summary.sale.quantity,
                 unit_cost=unit_cost,
-                cost_amount=summary.cogs_amount.quantize(Decimal("0.01")),
+                cost_amount=summary.cogs_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
                 allocation_type="credit_note_return",
                 confidence="estimated",
                 layer=return_layer,
@@ -885,7 +885,7 @@ class HistoricalSalesCostService:
             ),
             cogs_amount=sum(
                 (
-                    summary.cogs_amount.quantize(Decimal("0.01"))
+                    summary.cogs_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                     for summary in summaries
                 ),
                 Decimal("0"),
