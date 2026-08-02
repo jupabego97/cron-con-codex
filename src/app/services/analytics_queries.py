@@ -903,7 +903,7 @@ class AnalyticsQueryService:
              AND actions.product_key = candidates.product_key
             WHERE candidates.recommended_quantity > 0
               AND (
-                :review_status IS NULL
+                CAST(:review_status AS TEXT) IS NULL
                 OR COALESCE(actions.status, 'pending') = :review_status
               )
             ORDER BY CASE
