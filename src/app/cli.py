@@ -235,6 +235,7 @@ def import_opening_inventory(
         f"{result.status} run={result.import_run_id} read={result.records_read} "
         f"written={result.records_written} layers={result.layers_created} "
         f"exceptions={result.exception_count} unmatched={result.unmatched_count} "
+        f"classifications={result.classification_counts} "
         f"dry_run={result.dry_run}"
     )
 

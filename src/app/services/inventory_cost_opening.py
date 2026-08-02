@@ -12,6 +12,7 @@ import hashlib
 import json
 import unicodedata
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -58,6 +59,7 @@ class OpeningInventoryResult:
     layers_created: int
     exception_count: int
     unmatched_count: int
+    classification_counts: dict[str, int]
     dry_run: bool
 
 
@@ -67,6 +69,12 @@ class _ProductMatch:
     alegra_id: str
     name: str
     match_method: str
+
+
+@dataclass(frozen=True)
+class _ProductCatalog:
+    by_reference: dict[str, tuple[dict[str, Any], ...]]
+    by_name: dict[str, tuple[dict[str, Any], ...]]
 
 
 class InventoryCostOpeningService:
@@ -88,12 +96,13 @@ class InventoryCostOpeningService:
         warehouse = self._resolve_warehouse(
             tenant_id=tenant_id, warehouse_alegra_id=warehouse_alegra_id
         )
-        products = self._load_products(tenant_id=tenant_id)
+        products = _build_product_catalog(self._load_products(tenant_id=tenant_id))
         classified = [
             self._classify_row(row, products=products, warehouse=warehouse)
             for row in rows
         ]
         exceptions = [row for row in classified if row["classification"] != "opening_layer"]
+        classification_counts = dict(Counter(row["classification"] for row in classified))
         unmatched = [
             row
             for row in classified
@@ -110,6 +119,7 @@ class InventoryCostOpeningService:
                 layers_created=len(opening_rows),
                 exception_count=len(exceptions),
                 unmatched_count=len(unmatched),
+                classification_counts=classification_counts,
                 dry_run=True,
             )
 
@@ -128,6 +138,7 @@ class InventoryCostOpeningService:
                     existing["id"], "unmatched"
                 )
                 + self._count_opening_classification(existing["id"], "negative_unmatched"),
+                classification_counts=self._classification_counts(existing["id"]),
                 dry_run=False,
             )
 
@@ -313,6 +324,7 @@ class InventoryCostOpeningService:
                 layers_created=len(opening_rows),
                 exception_count=len(exceptions),
                 unmatched_count=len(unmatched),
+                classification_counts=classification_counts,
                 dry_run=False,
             )
         except Exception as error:
@@ -375,7 +387,7 @@ class InventoryCostOpeningService:
         self,
         row: OpeningInventoryRow,
         *,
-        products: list[dict[str, Any]],
+        products: _ProductCatalog,
         warehouse: dict[str, Any],
     ) -> dict[str, Any]:
         match, match_note = _match_product(row, products)
@@ -517,6 +529,17 @@ class InventoryCostOpeningService:
             ).scalar_one()
         )
 
+    def _classification_counts(self, import_run_id: uuid.UUID) -> dict[str, int]:
+        rows = self._session.execute(
+            text(
+                "SELECT classification, count(*) AS count "
+                "FROM inventory_cost_opening_balances "
+                "WHERE import_run_id=:run_id GROUP BY classification"
+            ),
+            {"run_id": import_run_id},
+        ).mappings()
+        return {str(row["classification"]): int(row["count"]) for row in rows}
+
 
 def read_opening_inventory_xlsx(path: Path) -> list[OpeningInventoryRow]:
     if not path.is_file():
@@ -561,9 +584,7 @@ def read_opening_inventory_xlsx(path: Path) -> list[OpeningInventoryRow]:
         workbook.close()
 
 
-def _match_product(
-    row: OpeningInventoryRow, products: list[dict[str, Any]]
-) -> tuple[_ProductMatch | None, str | None]:
+def _build_product_catalog(products: list[dict[str, Any]]) -> _ProductCatalog:
     by_reference: dict[str, list[dict[str, Any]]] = {}
     by_name: dict[str, list[dict[str, Any]]] = {}
     for product in products:
@@ -573,13 +594,22 @@ def _match_product(
             by_reference.setdefault(reference, []).append(product)
         if name:
             by_name.setdefault(name, []).append(product)
+    return _ProductCatalog(
+        by_reference={key: tuple(value) for key, value in by_reference.items()},
+        by_name={key: tuple(value) for key, value in by_name.items()},
+    )
+
+
+def _match_product(
+    row: OpeningInventoryRow, products: _ProductCatalog
+) -> tuple[_ProductMatch | None, str | None]:
     if row.reference:
-        candidates = by_reference.get(_normalize_text(row.reference), [])
+        candidates = products.by_reference.get(_normalize_text(row.reference), [])
         if len(candidates) == 1:
             return _product_match(candidates[0], "reference"), None
         if len(candidates) > 1:
             return None, "Reference matches multiple catalog products"
-    candidates = by_name.get(_normalize_text(row.item_name), [])
+    candidates = products.by_name.get(_normalize_text(row.item_name), [])
     if len(candidates) == 1:
         return _product_match(candidates[0], "name"), None
     if len(candidates) > 1:
