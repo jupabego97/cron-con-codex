@@ -514,6 +514,7 @@ class HistoricalSalesCostService:
     ) -> None:
         required = summary.sale.quantity
         sequence = 0
+        costed_rows: list[dict[str, Any]] = []
         for layer in product_layers:
             if required <= 0:
                 break
@@ -524,24 +525,30 @@ class HistoricalSalesCostService:
             required -= quantity
             summary.costed_quantity += quantity
             summary.cogs_amount += quantity * layer.unit_cost
-            allocations.append(
-                self._allocation_row(
-                    summary.sale,
-                    sequence=sequence,
-                    quantity=quantity,
-                    unit_cost=layer.unit_cost,
-                    cost_amount=quantity * layer.unit_cost,
-                    allocation_type="fifo",
-                    confidence=(
-                        "certified"
-                        if layer.source_type == "inventory_cost_opening"
-                        else "source"
-                    ),
-                    layer=layer,
-                    notes=f"Consumed {layer.source_type} cost layer",
-                )
+            allocation = self._allocation_row(
+                summary.sale,
+                sequence=sequence,
+                quantity=quantity,
+                unit_cost=layer.unit_cost,
+                cost_amount=quantity * layer.unit_cost,
+                allocation_type="fifo",
+                confidence=(
+                    "certified"
+                    if layer.source_type == "inventory_cost_opening"
+                    else "source"
+                ),
+                layer=layer,
+                notes=f"Consumed {layer.source_type} cost layer",
             )
+            allocations.append(allocation)
+            costed_rows.append(allocation)
             sequence += 1
+        if costed_rows:
+            rounded_total = summary.cogs_amount.quantize(Decimal("0.01"))
+            previous_total = sum(
+                (row["cost_amount"] for row in costed_rows[:-1]), Decimal("0")
+            )
+            costed_rows[-1]["cost_amount"] = rounded_total - previous_total
         if required > 0:
             summary.uncosted_quantity = required
             allocations.append(
@@ -630,7 +637,7 @@ class HistoricalSalesCostService:
                 sequence=0,
                 quantity=summary.sale.quantity,
                 unit_cost=unit_cost,
-                cost_amount=summary.cogs_amount,
+                cost_amount=summary.cogs_amount.quantize(Decimal("0.01")),
                 allocation_type="credit_note_return",
                 confidence="estimated",
                 layer=return_layer,
@@ -876,5 +883,11 @@ class HistoricalSalesCostService:
             costed_units=sum(
                 (summary.costed_quantity for summary in summaries), Decimal("0")
             ),
-            cogs_amount=sum((summary.cogs_amount for summary in summaries), Decimal("0")),
+            cogs_amount=sum(
+                (
+                    summary.cogs_amount.quantize(Decimal("0.01"))
+                    for summary in summaries
+                ),
+                Decimal("0"),
+            ),
         )
