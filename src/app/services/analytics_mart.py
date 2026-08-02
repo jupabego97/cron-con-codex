@@ -182,7 +182,7 @@ _FACTS = (
         SELECT si.tenant_id, dt.key,
                to_char(si.issue_date, 'YYYYMMDD')::integer, dp.key, dc.key, ds.key, NULL,
                'invoice', si.alegra_id, si.alegra_id, si.status, sil.line_number,
-               si.currency_code, COALESCE(sil.quantity, 0), sil.unit_price, 0, 0,
+               COALESCE(si.currency_code, :default_currency_code), COALESCE(sil.quantity, 0), sil.unit_price, 0, 0,
                COALESCE(sil.line_total, 0), NULL::numeric(18, 2), NULL::numeric(18, 2),
                si.is_deleted
         FROM sales_invoices si
@@ -196,7 +196,7 @@ _FACTS = (
         SELECT cn.tenant_id, dt.key,
                to_char(cn.issue_date, 'YYYYMMDD')::integer, dp.key, dc.key, NULL, dw.key,
                'credit_note', cn.alegra_id, cn.document_number, cn.status, cnl.line_number,
-               cn.currency_code, -COALESCE(cnl.quantity, 0), cnl.unit_price, 0, 0,
+               COALESCE(cn.currency_code, :default_currency_code), -COALESCE(cnl.quantity, 0), cnl.unit_price, 0, 0,
                -COALESCE(cnl.line_total, 0), NULL::numeric(18, 2), NULL::numeric(18, 2),
                cn.is_deleted
         FROM credit_notes cn
@@ -234,7 +234,7 @@ _FACTS = (
           (tenant_id, tenant_key, date_key, contact_key, payment_alegra_id, payment_type,
            document_number, currency_code, amount, is_deleted)
         SELECT p.tenant_id, dt.key, to_char(p.payment_date, 'YYYYMMDD')::integer,
-               dc.key, p.alegra_id, p.payment_type, p.document_number, p.currency_code,
+               dc.key, p.alegra_id, p.payment_type, p.document_number, COALESCE(p.currency_code, :default_currency_code),
                COALESCE(p.amount, 0), p.is_deleted
         FROM payments p
         JOIN dim_tenant dt ON dt.tenant_id = p.tenant_id

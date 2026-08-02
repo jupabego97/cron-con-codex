@@ -39,6 +39,9 @@ def test_mart_queries_include_credit_notes_and_balanced_transfer_movements() -> 
     assert "NULL::numeric(18, 2)" in statements
     assert "fact_inventory_snapshot" in statements
     assert "COALESCE(pb.currency_code, :default_currency_code)" in statements
+    assert "COALESCE(si.currency_code, :default_currency_code)" in statements
+    assert "COALESCE(cn.currency_code, :default_currency_code)" in statements
+    assert "COALESCE(p.currency_code, :default_currency_code)" in statements
     dimensions = "\n".join(str(statement) for statement in _DIMENSIONS)
     assert "family_name" in dimensions
 
