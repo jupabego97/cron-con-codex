@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import uuid
 from contextlib import suppress
+from datetime import date
 
 from alembic import command
 from alembic.config import Config
@@ -13,6 +14,7 @@ from app.domain.batch_repository import rebuild_purchase_bill_lines
 from app.integrations.alegra.client import AlegraClient
 from app.integrations.alegra.resources import resolve_resources
 from app.services.analytics_mart import AnalyticsMartService
+from app.services.inventory_cost_opening import InventoryCostOpeningService
 from app.services.inventory_snapshot import InventorySnapshotService
 from app.services.invoice_reconciliation import InvoiceReconciliationService
 from app.services.invoice_sync import InvoiceSyncService
@@ -80,6 +82,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inventory_snapshot.add_argument("tenant_id", type=uuid.UUID)
     inventory_snapshot.add_argument("--warehouse-concurrency", type=int, default=3)
+
+    opening = subparsers.add_parser(
+        "import-opening-inventory",
+        help="Import the certified opening inventory cost basis from an XLSX report",
+    )
+    opening.add_argument("tenant_id", type=uuid.UUID)
+    opening.add_argument("file_path")
+    opening.add_argument("--cutoff-date", type=date.fromisoformat, default=date(2026, 1, 1))
+    opening.add_argument("--warehouse-alegra-id")
+    opening.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="match the report against the catalog without writing import data",
+    )
 
     repair_purchases = subparsers.add_parser(
         "repair-purchase-lines",
@@ -199,6 +215,30 @@ def refresh_mart(*, tenant_id: uuid.UUID) -> None:
     print(f"{result.run_id} {result.status} written={result.records_written}")
 
 
+def import_opening_inventory(
+    *,
+    tenant_id: uuid.UUID,
+    file_path: str,
+    cutoff_date: date,
+    warehouse_alegra_id: str | None,
+    dry_run: bool,
+) -> None:
+    with get_session_factory()() as session:
+        result = InventoryCostOpeningService(session=session).import_xlsx(
+            tenant_id=tenant_id,
+            file_path=file_path,
+            cutoff_date=cutoff_date,
+            warehouse_alegra_id=warehouse_alegra_id,
+            dry_run=dry_run,
+        )
+    print(
+        f"{result.status} run={result.import_run_id} read={result.records_read} "
+        f"written={result.records_written} layers={result.layers_created} "
+        f"exceptions={result.exception_count} unmatched={result.unmatched_count} "
+        f"dry_run={result.dry_run}"
+    )
+
+
 def repair_purchase_lines(*, tenant_id: uuid.UUID, write_batch_size: int) -> None:
     with get_session_factory()() as session:
         documents, lines = rebuild_purchase_bill_lines(
@@ -272,6 +312,14 @@ def main() -> None:
                 tenant_id=args.tenant_id,
                 warehouse_concurrency=args.warehouse_concurrency,
             )
+        )
+    elif args.command == "import-opening-inventory":
+        import_opening_inventory(
+            tenant_id=args.tenant_id,
+            file_path=args.file_path,
+            cutoff_date=args.cutoff_date,
+            warehouse_alegra_id=args.warehouse_alegra_id,
+            dry_run=args.dry_run,
         )
 
 

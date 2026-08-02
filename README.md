@@ -81,6 +81,26 @@ En Railway, el Cron de captura requiere `DATABASE_URL` y
 `DATABASE_URL`. La configuracion recomendada esta en
 `docs/architecture/phase-4-analytics-mart.md`.
 
+## Costo historico de inventario
+
+El reporte certificado de inventario al 2026-01-01 se importa desde local,
+despues de aplicar la migracion. Primero ejecuta un `dry-run` para validar
+coincidencias contra la dimension de productos y la unica bodega activa:
+
+```powershell
+python -m app.cli migrate
+python -m app.cli import-opening-inventory <tenant-uuid> `
+  "D:\ruta\Alegra - Valor de inventario - JUAN PABLO BETANCUR GOMEZ -.xlsx" `
+  --cutoff-date 2026-01-01 --dry-run
+```
+
+Si el resultado es aceptable, repite el comando sin `--dry-run`. Las filas
+positivas con producto identificado crean capas de costo certificadas; las
+filas con cantidad cero quedan como referencia y las filas negativas quedan
+como excepciones auditables sin crear inventario. La carga es idempotente por
+tenant, fecha de corte y hash del archivo. Consulta
+`docs/architecture/phase-6-historical-cost.md` antes de cargarla en Railway.
+
 ## Dashboard interno
 
 El dashboard React se sirve desde la misma URL del API. Configura
