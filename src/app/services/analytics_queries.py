@@ -736,6 +736,9 @@ class AnalyticsQueryService:
             {
                 "snapshot_run_id": run["id"],
                 "selected_from": filters.from_date,
+                "velocity_7_from": filters.to_date - timedelta(days=6),
+                "velocity_30_from": filters.to_date - timedelta(days=29),
+                "velocity_90_from": filters.to_date - timedelta(days=89),
                 "selected_days": selected_days,
                 "recommendation_currency": (filters.currency or "COP").upper(),
                 "target_coverage_days": target_coverage_days,
