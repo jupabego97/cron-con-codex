@@ -708,6 +708,13 @@ class AnalyticsQueryService:
             "velocity_7_from": filters.to_date - timedelta(days=6),
             "velocity_30_from": filters.to_date - timedelta(days=29),
             "velocity_90_from": filters.to_date - timedelta(days=89),
+            # Pre-2025 inventory history is not considered reliable for
+            # replenishment.  Purchases are only used as a recent lot-size
+            # reference, never as an inferred stock balance.
+            "purchase_history_from": max(
+                date(2025, 1, 1), filters.to_date - timedelta(days=365)
+            ),
+            "purchase_history_to": filters.to_date,
             "review_status": review_status,
         }
         if run is None:
@@ -926,6 +933,11 @@ class AnalyticsQueryService:
             }
         )
         raw_items = self._rows(statement, params)
+        purchase_context = self._replenishment_purchase_context(
+            currency_code=(filters.currency or "COP").upper(),
+            history_from=parameters["purchase_history_from"],
+            history_to=filters.to_date,
+        )
         policy_context = self._replenishment_policy_context(
             (filters.currency or "COP").upper()
         )
@@ -935,6 +947,11 @@ class AnalyticsQueryService:
             target_coverage_days=target_coverage_days,
             lead_time_days=lead_time_days,
             safety_days=safety_days,
+            purchase_context=purchase_context,
+            snapshot_age_days=max(
+                0,
+                (date.today() - run["finished_at"].date()).days,
+            ),
         )
         supplier_orders = self._supplier_purchase_plans(items, filters.to_date)
         policies = self.replenishment_policies((filters.currency or "COP").upper())
@@ -973,6 +990,66 @@ class AnalyticsQueryService:
             "product_policies": policies["product_policies"],
             "summary": summary,
             **self._replenishment_opportunities(filters, run["id"]),
+        }
+
+    def _replenishment_purchase_context(
+        self,
+        *,
+        currency_code: str,
+        history_from: date,
+        history_to: date,
+    ) -> dict[str, Any]:
+        """Return recent purchase cadence and lot-size context by product.
+
+        This deliberately starts no earlier than 2025-01-01.  The current
+        inventory snapshot remains the physical-stock source; purchase
+        quantities are only evidence for how the business historically buys
+        a product.  Aggregating by document first prevents a multi-line bill
+        from being mistaken for several purchase events.
+        """
+        rows = self._rows(
+            """
+            WITH purchase_events AS (
+              SELECT p.product_key,
+                     p.document_alegra_id,
+                     min(d.calendar_date) AS purchase_date,
+                     sum(p.quantity) AS quantity
+              FROM fact_purchase_line p
+              JOIN dim_date d ON d.date_key = p.date_key
+              WHERE p.tenant_id = :tenant_id
+                AND p.is_deleted = false
+                AND p.product_key IS NOT NULL
+                AND p.currency_code = :currency_code
+                AND d.calendar_date BETWEEN :history_from AND :history_to
+              GROUP BY p.product_key, p.document_alegra_id
+              HAVING sum(p.quantity) > 0
+            )
+            SELECT product_key,
+                   count(*) AS purchase_events_365d,
+                   count(*) FILTER (
+                     WHERE purchase_date >= :recent_90_from
+                   ) AS purchase_events_90d,
+                   min(purchase_date) AS first_purchase_date,
+                   max(purchase_date) AS last_purchase_date,
+                   (array_agg(quantity ORDER BY purchase_date DESC, document_alegra_id DESC))[1]
+                     AS last_purchase_quantity,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY quantity)
+                     AS median_purchase_quantity,
+                   avg(quantity) AS average_purchase_quantity
+            FROM purchase_events
+            GROUP BY product_key
+            """,
+            {
+                "currency_code": currency_code,
+                "history_from": history_from,
+                "history_to": history_to,
+                "recent_90_from": max(history_from, history_to - timedelta(days=89)),
+            },
+        )
+        return {
+            "history_from": history_from,
+            "history_to": history_to,
+            "products": {int(row["product_key"]): row for row in rows},
         }
 
     def _replenishment_policy_context(self, currency_code: str) -> dict[str, Any]:
@@ -1047,12 +1124,67 @@ class AnalyticsQueryService:
         target_coverage_days: int,
         lead_time_days: int,
         safety_days: int,
+        purchase_context: dict[str, Any] | None = None,
+        snapshot_age_days: int | None = None,
     ) -> list[dict[str, Any]]:
         suppliers = policy_context["suppliers"]
         products = policy_context["products"]
         preferred_rows = policy_context["preferred"]
+        purchase_context = purchase_context or {"products": {}}
+        purchase_rows = purchase_context.get("products", {})
+        history_from = purchase_context.get("history_from")
         for item in items:
             product_key = int(item["product_key"])
+            purchase = purchase_rows.get(product_key, {})
+            purchase_events = int(purchase.get("purchase_events_365d", 0) or 0)
+            last_purchase_date = purchase.get("last_purchase_date")
+            if purchase_events >= 2 and purchase.get("first_purchase_date") and last_purchase_date:
+                purchase_span = (
+                    last_purchase_date - purchase["first_purchase_date"]
+                ).days
+                purchase_cycle_days = Decimal(str(purchase_span)) / Decimal(
+                    str(purchase_events - 1)
+                )
+            else:
+                purchase_cycle_days = None
+            last_purchase_quantity = purchase.get("last_purchase_quantity")
+            median_purchase_quantity = purchase.get("median_purchase_quantity")
+            if purchase_events >= 3 and median_purchase_quantity:
+                purchase_lot_reference = median_purchase_quantity
+                lot_reference_source = "mediana_365_dias"
+            else:
+                purchase_lot_reference = last_purchase_quantity
+                lot_reference_source = "ultima_compra" if last_purchase_quantity else None
+            if purchase_events >= 3 and last_purchase_date and (
+                date.today() - last_purchase_date
+            ).days <= 180:
+                purchase_history_confidence = "alta"
+            elif purchase_events >= 1:
+                purchase_history_confidence = "media"
+            else:
+                purchase_history_confidence = "baja"
+            item.update(
+                {
+                    "purchase_history_from": history_from,
+                    "purchase_history_to": purchase_context.get("history_to"),
+                    "purchase_events_365d": purchase_events,
+                    "purchase_events_90d": int(
+                        purchase.get("purchase_events_90d", 0) or 0
+                    ),
+                    "first_purchase_date": purchase.get("first_purchase_date"),
+                    "last_purchase_any_date": last_purchase_date,
+                    "last_purchase_date": last_purchase_date,
+                    "last_purchase_quantity": last_purchase_quantity,
+                    "median_purchase_quantity": median_purchase_quantity,
+                    "average_purchase_quantity": purchase.get(
+                        "average_purchase_quantity"
+                    ),
+                    "purchase_cycle_days": purchase_cycle_days,
+                    "purchase_lot_reference": purchase_lot_reference,
+                    "lot_reference_source": lot_reference_source,
+                    "purchase_history_confidence": purchase_history_confidence,
+                }
+            )
             preferred = preferred_rows.get(product_key)
             if preferred is not None:
                 item["supplier_key"] = preferred["supplier_key"]
@@ -1164,19 +1296,76 @@ class AnalyticsQueryService:
             )
             daily_velocity = Decimal(str(item.get("daily_velocity", 0) or 0))
             stock = Decimal(str(item.get("quantity_on_hand", 0) or 0))
+            stock_for_replenishment = max(stock, Decimal("0"))
+            stock_discrepancy = max(-stock, Decimal("0"))
+            inventory_exception = (
+                "stock_negativo"
+                if stock < 0
+                else "stock_cero"
+                if stock == 0
+                else "ninguna"
+            )
             minimum = Decimal(str(item.get("minimum_order_quantity", 0) or 0))
             pack = Decimal(str(item.get("pack_size", 1) or 1))
             order_up_to_days = (
                 target_coverage_days + item["effective_lead_time_days"] + safety_days
             )
-            base_quantity = max(daily_velocity * order_up_to_days - stock, Decimal("0"))
+            base_quantity = max(
+                daily_velocity * order_up_to_days - stock_for_replenishment,
+                Decimal("0"),
+            )
             if base_quantity > 0:
                 quantity = max(base_quantity, minimum)
                 quantity = (quantity / pack).to_integral_value(rounding=ROUND_CEILING) * pack
             else:
                 quantity = Decimal("0")
             item["order_up_to_days"] = order_up_to_days
+            item["stock_for_replenishment"] = stock_for_replenishment
+            item["stock_discrepancy_quantity"] = stock_discrepancy
+            item["inventory_exception"] = inventory_exception
+            item["base_recommended_quantity"] = base_quantity
             item["recommended_quantity"] = quantity
+            lot_reference = Decimal(str(purchase_lot_reference or 0))
+            if base_quantity > 0 and lot_reference > 0:
+                lot_quantity = (
+                    base_quantity / lot_reference
+                ).to_integral_value(rounding=ROUND_CEILING) * lot_reference
+            else:
+                lot_quantity = Decimal("0")
+            item["suggested_quantity_by_historical_lot"] = lot_quantity
+            stock_confidence = (
+                "alta"
+                if snapshot_age_days is not None and snapshot_age_days <= 7
+                else "media"
+                if snapshot_age_days is not None and snapshot_age_days <= 30
+                else "baja"
+            )
+            confidence_rank = {"baja": 1, "media": 2, "alta": 3}
+            recommendation_confidence = min(
+                (stock_confidence, purchase_history_confidence),
+                key=lambda value: confidence_rank[value],
+            )
+            if stock < 0:
+                recommendation_confidence = "baja"
+            item["stock_confidence"] = stock_confidence
+            item["recommendation_confidence"] = recommendation_confidence
+            item["confidence_score"] = {
+                "baja": 35,
+                "media": 65,
+                "alta": 95,
+            }[recommendation_confidence]
+            item["data_quality_flag"] = (
+                "reconciliar_stock_negativo"
+                if stock < 0
+                else "historial_compra_insuficiente"
+                if purchase_events == 0
+                else "ok"
+            )
+            item["replenishment_warning"] = (
+                "Reconciliar stock negativo antes de comprar"
+                if stock < 0
+                else None
+            )
             item["estimated_purchase_value"] = quantity * Decimal(
                 str(item.get("unit_cost", 0) or 0)
             )
@@ -1258,6 +1447,7 @@ class AnalyticsQueryService:
                     "estimated_value": Decimal("0"),
                     "critical_lines": 0,
                     "high_lines": 0,
+                    "inventory_exception_lines": 0,
                     "policy_configured": False,
                     "minimum_order_amount": item.get("minimum_order_amount"),
                     "shipping_cost": item.get("shipping_cost") or Decimal("0"),
@@ -1272,6 +1462,9 @@ class AnalyticsQueryService:
             group["estimated_value"] += item["estimated_purchase_value"]
             group["critical_lines"] += int(item.get("priority") == "critical")
             group["high_lines"] += int(item.get("priority") == "high")
+            group["inventory_exception_lines"] += int(
+                item.get("inventory_exception") == "stock_negativo"
+            )
             group["policy_configured"] = group["policy_configured"] or bool(
                 item.get("policy_configured")
             )
@@ -1288,13 +1481,21 @@ class AnalyticsQueryService:
                     "priority": item.get("priority"),
                     "coverage_days": item.get("coverage_days"),
                     "supplier_source": item.get("supplier_source"),
+                    "last_purchase_quantity": item.get("last_purchase_quantity"),
+                    "purchase_lot_reference": item.get("purchase_lot_reference"),
+                    "purchase_events_365d": item.get("purchase_events_365d"),
+                    "inventory_exception": item.get("inventory_exception"),
+                    "recommendation_confidence": item.get("recommendation_confidence"),
                 }
             )
         for group in grouped.values():
             minimum = Decimal(str(group["minimum_order_amount"] or 0))
             value = Decimal(str(group["estimated_value"] or 0))
             critical = group["critical_lines"] > 0
-            if group["supplier_key"] is None:
+            if group["inventory_exception_lines"] > 0:
+                decision = "review"
+                reason = "Hay stock negativo; reconcilia el inventario antes de emitir el pedido."
+            elif group["supplier_key"] is None:
                 decision = "review"
                 reason = "No hay un proveedor identificado con suficiente evidencia."
             elif critical:
