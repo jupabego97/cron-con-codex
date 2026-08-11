@@ -48,6 +48,19 @@ def test_kpis_api_rejects_requests_without_a_dashboard_session(monkeypatch) -> N
     assert response.status_code == 401
 
 
+def test_ai_api_rejects_requests_without_a_dashboard_session(monkeypatch) -> None:
+    settings = Settings(
+        app_secret_key="test-session-secret",
+        dashboard_password="dashboard-password",
+        dashboard_tenant_id="23332716-6b46-41d4-bc9b-03613fbab6df",
+    )
+    monkeypatch.setattr(dashboard, "get_settings", lambda: settings)
+    with TestClient(create_app()) as client:
+        assert client.get("/api/v1/ai/status").status_code == 401
+        response = client.post("/api/v1/ai/chat", json={"message": "Analiza el inventario"})
+        assert response.status_code == 401
+
+
 def test_replenishment_exports_and_actions_require_a_dashboard_session(monkeypatch) -> None:
     settings = Settings(
         app_secret_key="test-session-secret",

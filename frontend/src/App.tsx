@@ -14,7 +14,7 @@ import {
 import { api, Filters, Option, query } from "./api";
 import { money, number } from "./format";
 
-type Tab = "overview" | "sales" | "purchases" | "suppliers" | "payments" | "customers" | "products" | "kpis" | "purchase-recommendations" | "inventory" | "alerts";
+type Tab = "overview" | "sales" | "purchases" | "suppliers" | "payments" | "customers" | "products" | "kpis" | "purchase-recommendations" | "inventory" | "alerts" | "assistant";
 type Row = Record<string, string | number | null>;
 type SupplierOption = {
   supplier_key?: number | null;
@@ -71,6 +71,7 @@ const tabs: Array<[Tab, string]> = [
   ["purchase-recommendations", "Reponer"],
   ["inventory", "Inventario"],
   ["alerts", "Alertas"],
+  ["assistant", "Asistente IA"],
 ];
 
 function todayIso(): string {
@@ -118,6 +119,11 @@ export default function App() {
 
   useEffect(() => {
     if (!authenticated) return;
+    if (tab === "assistant") {
+      setData(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     api<Record<string, unknown>>(`/analytics/${tab}${query(filters, tab === "purchase-recommendations" ? replenishmentParams : {})}`)
@@ -230,6 +236,7 @@ function RefreshNotice({ status }: { status: Row }) {
 }
 
 function DashboardTab({ tab, data, filters, replenishmentParams, setReplenishmentParams }: { tab: Tab; data: Record<string, unknown> | null; filters: Filters; replenishmentParams: ReplenishmentParams; setReplenishmentParams: (value: ReplenishmentParams) => void }) {
+  if (tab === "assistant") return <AIAssistant filters={filters} />;
   if (!data) return <div className="empty">No hay datos para el período seleccionado.</div>;
   if (tab === "overview") return <Overview data={data as unknown as Overview} />;
   if (tab === "sales") return <SalesReports data={data} />;
@@ -315,6 +322,74 @@ function KpiView({ data }: { data: Record<string, unknown> }) {
 function StockPriorityTable({ title, rows, coverage = false }: { title: string; rows: Row[]; coverage?: boolean }) {
   if (!rows.length) return <section className="table-card"><h3>{title}</h3><p className="muted">Sin productos para estos criterios.</p></section>;
   return <section className="table-card"><h3>{title}</h3><table><thead><tr><th>Producto</th><th>Stock</th><th>Unidades vendidas</th>{coverage && <th>Cobertura</th>}<th>Valor a costo</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.label}-${index}`}><td>{String(row.label)}</td><td>{number(row.quantity_on_hand)}</td><td>{number(row.period_units_sold)}</td>{coverage && <td>{number(row.coverage_days)} días</td>}<td>{money(row.inventory_value)}</td></tr>)}</tbody></table></section>;
+}
+
+type AIChatMessage = { role: "user" | "assistant"; content: string };
+type AIChatResponse = { conversation_id: string; answer: string; model: string; tools_used?: Array<{ tool?: string; duration_ms?: number }> };
+
+function AIAssistant({ filters }: { filters: Filters }) {
+  const [messages, setMessages] = useState<AIChatMessage[]>([
+    {
+      role: "assistant",
+      content: "Soy tu copiloto analitico. Puedo revisar inventario, reposicion, ventas, compras, proveedores, pagos y KPIs usando los filtros actuales.",
+    },
+  ]);
+  const [input, setInput] = useState("");
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [configured, setConfigured] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    api<{ configured: boolean }>("/ai/status")
+      .then((response) => setConfigured(response.configured))
+      .catch(() => setConfigured(false));
+  }, []);
+
+  async function ask(question: string) {
+    const message = question.trim();
+    if (!message || loading || configured === false) return;
+    setInput("");
+    setError(null);
+    setMessages((current) => [...current, { role: "user", content: message }]);
+    setLoading(true);
+    try {
+      const response = await api<AIChatResponse>("/ai/chat", {
+        method: "POST",
+        body: JSON.stringify({ message, conversation_id: conversationId, context: filters }),
+      });
+      setConversationId(response.conversation_id);
+      const tools = response.tools_used?.map((item) => String(item.tool || "")).filter(Boolean).join(", ");
+      setMessages((current) => [...current, { role: "assistant", content: response.answer + (tools ? `\n\nFuentes consultadas: ${tools}.` : "") }]);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible consultar el asistente.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    void ask(input);
+  }
+
+  const suggestions = [
+    "Que productos debo comprar primero y por que?",
+    "Detecta inconsistencias importantes en el inventario actual.",
+    "Resume ventas, compras y margen del periodo seleccionado.",
+    "A que proveedores deberia comprarles y que productos?",
+  ];
+
+  return <>
+    <div className="section-heading"><div><h2>Asistente IA</h2><p className="muted">Analisis de solo lectura sobre el data mart. El asistente no modifica Alegra ni aprueba compras.</p></div><span className="ai-readonly-badge">Solo lectura</span></div>
+    {configured === false && <div className="warning">El asistente esta desactivado. Configura OPENAI_API_KEY en las variables del servicio API de Railway.</div>}
+    <section className="ai-suggestions">{suggestions.map((suggestion) => <button key={suggestion} type="button" disabled={configured === false} onClick={() => void ask(suggestion)}>{suggestion}</button>)}</section>
+    <section className="ai-chat-card">
+      <div className="ai-messages">{messages.map((message, index) => <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}><small>{message.role === "assistant" ? "Asistente" : "Tu"}</small><p>{message.content}</p></div>)}{loading && <div className="ai-message assistant"><small>Asistente</small><p>Analizando los datos...</p></div>}</div>
+      {error && <div className="error">{error}</div>}
+      <form className="ai-composer" onSubmit={submit}><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="Pregunta por inventario, ventas, compras o proveedores..." maxLength={4000} rows={3} disabled={configured === false} /><button className="primary-button" disabled={loading || configured === false || !input.trim()}>{loading ? "Analizando..." : "Consultar"}</button></form>
+    </section>
+  </>;
 }
 
 function PurchaseRecommendations({ data, filters, replenishmentParams, setReplenishmentParams }: { data: Record<string, unknown>; filters: Filters; replenishmentParams: ReplenishmentParams; setReplenishmentParams: (value: ReplenishmentParams) => void }) {

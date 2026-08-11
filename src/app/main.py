@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
+from app.api.ai import router as ai_router
 from app.api.analytics import router as analytics_router
 from app.api.dashboard import router as dashboard_router
 from app.api.health import router as health_router
@@ -54,6 +55,7 @@ def create_app() -> FastAPI:
     app.include_router(webhook_router)
     app.include_router(dashboard_router)
     app.include_router(analytics_router)
+    app.include_router(ai_router)
     _mount_dashboard(app)
     return app
 

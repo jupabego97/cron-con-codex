@@ -1,0 +1,132 @@
+from datetime import date
+from decimal import Decimal
+from uuid import UUID
+
+from app.services.ai_agent import TOOLS, RetailAIAgent, _filters_from_arguments, _json_safe
+from app.services.analytics_queries import AnalyticsFilters
+
+
+def test_ai_tools_are_read_only_functions() -> None:
+    names = {tool["name"] for tool in TOOLS}
+
+    assert names == {
+        "get_inventory_analysis",
+        "get_replenishment_plan",
+        "get_sales_analysis",
+        "get_purchase_supplier_analysis",
+        "get_payments_analysis",
+        "get_customer_analysis",
+        "get_business_kpis",
+        "get_data_status",
+    }
+    assert all(tool["type"] == "function" for tool in TOOLS)
+
+
+def test_tool_filters_inherit_dashboard_context_and_bound_date_range() -> None:
+    base = AnalyticsFilters(
+        from_date=date(2026, 7, 1),
+        to_date=date(2026, 7, 31),
+        currency="COP",
+        family="Computadores",
+    )
+
+    result = _filters_from_arguments(
+        {"to_date": "2026-08-09", "product_key": 42},
+        base,
+    )
+
+    assert result.from_date == date(2026, 7, 1)
+    assert result.to_date == date(2026, 8, 9)
+    assert result.currency == "COP"
+    assert result.family == "Computadores"
+    assert result.product_key == 42
+
+
+def test_json_safe_preserves_decimal_as_text() -> None:
+    value = {"amount": Decimal("123.45"), "date": date.today(), "items": [Decimal("2")]}
+
+    result = _json_safe(value)
+
+    assert result["amount"] == "123.45"
+    assert result["date"] == date.today().isoformat()
+    assert result["items"] == ["2"]
+
+
+class _Result:
+    def first(self):
+        return None
+
+    def mappings(self):
+        return []
+
+
+class _Session:
+    def __init__(self) -> None:
+        self.commits = 0
+
+    def execute(self, *_args, **_kwargs):
+        return _Result()
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+class _Analytics:
+    def refresh_status(self):
+        return {"status": "succeeded"}
+
+    def _one(self, *_args, **_kwargs):
+        return {"status": "succeeded"}
+
+
+class _Call:
+    type = "function_call"
+    name = "get_data_status"
+    arguments = "{}"
+    call_id = "call_1"
+
+
+class _Response:
+    def __init__(self, output, output_text=None):
+        self.output = output
+        self.output_text = output_text
+
+
+class _Responses:
+    def __init__(self):
+        self.calls = 0
+
+    def create(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return _Response([_Call()])
+        return _Response([], "El mart esta actualizado.")
+
+
+class _Client:
+    def __init__(self):
+        self.responses = _Responses()
+
+
+def test_agent_executes_tools_before_returning_answer() -> None:
+    session = _Session()
+    agent = RetailAIAgent(
+        session=session,
+        tenant_id=UUID("23332716-6b46-41d4-bc9b-03613fbab6df"),
+        analytics=_Analytics(),
+        api_key="test-key",
+        model="test-model",
+    )
+    client = _Client()
+    agent._client = lambda: client
+
+    result = agent.ask(
+        message="Esta actualizado el mart?",
+        base_filters=AnalyticsFilters.default(),
+    )
+
+    assert result["answer"] == "El mart esta actualizado."
+    assert len(result["tools_used"]) == 1
+    assert result["tools_used"][0]["tool"] == "get_data_status"
+    assert client.responses.calls == 2
+    assert session.commits == 1

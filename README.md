@@ -115,6 +115,8 @@ Las líneas sin cobertura no reciben un costo inventado: quedan visibles como
 
 El dashboard React se sirve desde la misma URL del API. Configura
 `DASHBOARD_PASSWORD`, `DASHBOARD_TENANT_ID` y, si aplica, `ANALYTICS_DEFAULT_CURRENCY_CODE`
+
+El asistente analítico usa OpenAI y permanece en modo de solo lectura. En el servicio API configura `OPENAI_API_KEY` como variable de entorno de Railway; nunca la guardes en el repositorio. `OPENAI_MODEL` es opcional y por defecto usa `gpt-4.1-mini`. Después de aplicar la migración `20260810_14`, el panel mostrará la pestaña **Asistente IA**.
 en el servicio API, despliega y abre su dominio público. Después de la migración,
 ejecuta `python -m app.cli refresh-mart <tenant-uuid>` para proyectar familias y
 moneda en el mart. Consulta `docs/architecture/phase-5-dashboard.md` y
