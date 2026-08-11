@@ -130,3 +130,59 @@ def test_agent_executes_tools_before_returning_answer() -> None:
     assert result["tools_used"][0]["tool"] == "get_data_status"
     assert client.responses.calls == 2
     assert session.commits == 1
+
+
+class _GeminiCall:
+    type = "function_call"
+    name = "get_data_status"
+    arguments = {}
+    id = "gemini-call-1"
+
+
+class _GeminiResponse:
+    def __init__(self, steps, output_text=None, interaction_id="interaction-1"):
+        self.steps = steps
+        self.output_text = output_text
+        self.id = interaction_id
+
+
+class _Interactions:
+    def __init__(self):
+        self.calls = 0
+
+    def create(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return _GeminiResponse([_GeminiCall()])
+        return _GeminiResponse([], "El mart esta actualizado.", "interaction-2")
+
+
+class _GeminiClient:
+    def __init__(self):
+        self.interactions = _Interactions()
+
+
+def test_agent_executes_gemini_interactions_tools_before_returning_answer() -> None:
+    session = _Session()
+    agent = RetailAIAgent(
+        session=session,
+        tenant_id=UUID("23332716-6b46-41d4-bc9b-03613fbab6df"),
+        analytics=_Analytics(),
+        api_key="test-key",
+        model="gemini-3.6-flash",
+        provider="gemini",
+    )
+    client = _GeminiClient()
+    agent._client = lambda: client
+
+    result = agent.ask(
+        message="Esta actualizado el mart?",
+        base_filters=AnalyticsFilters.default(),
+    )
+
+    assert result["answer"] == "El mart esta actualizado."
+    assert result["provider"] == "gemini"
+    assert len(result["tools_used"]) == 1
+    assert result["tools_used"][0]["tool"] == "get_data_status"
+    assert client.interactions.calls == 2
+    assert session.commits == 1

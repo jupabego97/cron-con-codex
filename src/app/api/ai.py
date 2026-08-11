@@ -61,12 +61,25 @@ def get_ai_status(
     _: Annotated[UUID, Depends(require_dashboard_session)],
 ) -> dict[str, object]:
     settings = get_settings()
-    return {
-        "configured": bool(
+    if settings.ai_provider == "gemini":
+        configured = bool(
+            settings.gemini_api_key
+            and settings.gemini_api_key.get_secret_value().strip()
+        )
+        model = settings.gemini_model
+        key_name = "GEMINI_API_KEY"
+    else:
+        configured = bool(
             settings.openai_api_key
             and settings.openai_api_key.get_secret_value().strip()
-        ),
-        "model": settings.openai_model,
+        )
+        model = settings.openai_model
+        key_name = "OPENAI_API_KEY"
+    return {
+        "configured": configured,
+        "provider": settings.ai_provider,
+        "model": model,
+        "key_name": key_name,
         "mode": "read_only",
     }
 
@@ -78,10 +91,18 @@ def chat(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> dict[str, object]:
     settings = get_settings()
-    if not settings.openai_api_key or not settings.openai_api_key.get_secret_value().strip():
+    if settings.ai_provider == "gemini":
+        api_key = settings.gemini_api_key
+        model = settings.gemini_model
+        key_name = "GEMINI_API_KEY"
+    else:
+        api_key = settings.openai_api_key
+        model = settings.openai_model
+        key_name = "OPENAI_API_KEY"
+    if not api_key or not api_key.get_secret_value().strip():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="El asistente no esta configurado. Agrega OPENAI_API_KEY en Railway.",
+            detail=f"El asistente no esta configurado. Agrega {key_name} en Railway.",
         )
     filters = _context_filters(payload.context)
     analytics = AnalyticsQueryService(
@@ -94,8 +115,9 @@ def chat(
             session=session,
             tenant_id=tenant_id,
             analytics=analytics,
-            api_key=settings.openai_api_key.get_secret_value(),
-            model=settings.openai_model,
+            api_key=api_key.get_secret_value(),
+            model=model,
+            provider=settings.ai_provider,
             max_tool_rounds=settings.openai_max_tool_rounds,
         )
         return agent.ask(

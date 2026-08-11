@@ -2155,21 +2155,22 @@ class AnalyticsQueryService:
     def refresh_status(self) -> dict[str, Any]:
         return self._one(
             """
-            SELECT id, status, started_at, finished_at, records_written, error_message,
-                   (finished_at IS NULL OR finished_at < now() - interval '2 hours') AS is_stale,
+            SELECT mart.id, mart.status, mart.started_at, mart.finished_at,
+                   mart.records_written, mart.error_message,
+                   (mart.finished_at IS NULL OR mart.finished_at < now() - interval '2 hours') AS is_stale,
                    cost.id AS cost_run_id, cost.status AS cost_status,
                    cost.finished_at AS cost_finished_at,
                    COALESCE(cost.finished_at IS NULL OR cost.finished_at < now() - interval '2 hours', true)
                      AS cost_is_stale
-            FROM mart_refresh_runs
+            FROM mart_refresh_runs mart
             LEFT JOIN LATERAL (
-              SELECT id, status, finished_at
-              FROM sales_cost_allocation_runs
-              WHERE tenant_id = mart_refresh_runs.tenant_id
-              ORDER BY started_at DESC LIMIT 1
+              SELECT cost_run.id, cost_run.status, cost_run.finished_at
+              FROM sales_cost_allocation_runs cost_run
+              WHERE cost_run.tenant_id = mart.tenant_id
+              ORDER BY cost_run.started_at DESC LIMIT 1
             ) cost ON true
-            WHERE tenant_id = :tenant_id AND status = 'succeeded'
-            ORDER BY started_at DESC LIMIT 1
+            WHERE mart.tenant_id = :tenant_id AND mart.status = 'succeeded'
+            ORDER BY mart.started_at DESC LIMIT 1
             """
         ) or {"status": "never_run", "is_stale": True}
 

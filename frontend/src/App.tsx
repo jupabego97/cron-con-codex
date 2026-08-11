@@ -338,17 +338,17 @@ function AIAssistant({ filters }: { filters: Filters }) {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [aiConfig, setAiConfig] = useState<{ configured: boolean; provider?: string; model?: string; key_name?: string } | null>(null);
 
   useEffect(() => {
-    api<{ configured: boolean }>("/ai/status")
-      .then((response) => setConfigured(response.configured))
-      .catch(() => setConfigured(false));
+    api<{ configured: boolean; provider?: string; model?: string; key_name?: string }>("/ai/status")
+      .then(setAiConfig)
+      .catch(() => setAiConfig({ configured: false }));
   }, []);
 
   async function ask(question: string) {
     const message = question.trim();
-    if (!message || loading || configured === false) return;
+    if (!message || loading || aiConfig?.configured === false) return;
     setInput("");
     setError(null);
     setMessages((current) => [...current, { role: "user", content: message }]);
@@ -382,12 +382,13 @@ function AIAssistant({ filters }: { filters: Filters }) {
 
   return <>
     <div className="section-heading"><div><h2>Asistente IA</h2><p className="muted">Analisis de solo lectura sobre el data mart. El asistente no modifica Alegra ni aprueba compras.</p></div><span className="ai-readonly-badge">Solo lectura</span></div>
-    {configured === false && <div className="warning">El asistente esta desactivado. Configura OPENAI_API_KEY en las variables del servicio API de Railway.</div>}
-    <section className="ai-suggestions">{suggestions.map((suggestion) => <button key={suggestion} type="button" disabled={configured === false} onClick={() => void ask(suggestion)}>{suggestion}</button>)}</section>
+    {aiConfig?.configured === false && <div className="warning">El asistente esta desactivado. Configura {aiConfig.key_name || "la clave del proveedor"} en las variables del servicio API de Railway.</div>}
+    {aiConfig?.configured && <p className="muted ai-provider">Proveedor: {aiConfig.provider} · Modelo: {aiConfig.model}</p>}
+    <section className="ai-suggestions">{suggestions.map((suggestion) => <button key={suggestion} type="button" disabled={aiConfig?.configured === false} onClick={() => void ask(suggestion)}>{suggestion}</button>)}</section>
     <section className="ai-chat-card">
       <div className="ai-messages">{messages.map((message, index) => <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}><small>{message.role === "assistant" ? "Asistente" : "Tu"}</small><p>{message.content}</p></div>)}{loading && <div className="ai-message assistant"><small>Asistente</small><p>Analizando los datos...</p></div>}</div>
       {error && <div className="error">{error}</div>}
-      <form className="ai-composer" onSubmit={submit}><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="Pregunta por inventario, ventas, compras o proveedores..." maxLength={4000} rows={3} disabled={configured === false} /><button className="primary-button" disabled={loading || configured === false || !input.trim()}>{loading ? "Analizando..." : "Consultar"}</button></form>
+      <form className="ai-composer" onSubmit={submit}><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="Pregunta por inventario, ventas, compras o proveedores..." maxLength={4000} rows={3} disabled={aiConfig?.configured === false} /><button className="primary-button" disabled={loading || aiConfig?.configured === false || !input.trim()}>{loading ? "Analizando..." : "Consultar"}</button></form>
     </section>
   </>;
 }

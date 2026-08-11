@@ -25,8 +25,11 @@ class Settings(BaseSettings):
     redis_url: str | None = None
     alegra_api_basic_token: SecretStr | None = None
     alegra_webhook_secret: SecretStr | None = None
+    ai_provider: Literal["openai", "gemini"] = "openai"
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-4.1-mini"
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = "gemini-3.6-flash"
     openai_max_tool_rounds: int = 4
 
     dashboard_password: SecretStr | None = None

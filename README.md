@@ -122,6 +122,8 @@ ejecuta `python -m app.cli refresh-mart <tenant-uuid>` para proyectar familias y
 moneda en el mart. Consulta `docs/architecture/phase-5-dashboard.md` y
 `docs/architecture/phase-7-families-suppliers.md`.
 
+Configuración del proveedor del asistente: usa `AI_PROVIDER=openai` con `OPENAI_API_KEY`, o `AI_PROVIDER=gemini` con `GEMINI_API_KEY`. Para Gemini 3.6 Flash, configura `GEMINI_MODEL=gemini-3.6-flash`. Las claves deben existir solo como variables del servicio API en Railway. La migración `20260811_15` guarda el proveedor y el identificador de conversación externo.
+
 ## Documentación
 
 - [Fase 0](docs/architecture/phase-0.md)

@@ -1,4 +1,4 @@
-"""Read-only OpenAI copilot over the tenant-scoped analytics mart."""
+"""Read-only AI copilot over the tenant-scoped analytics mart."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class AIAgentError(RuntimeError):
 
 
 class AIAgentNotConfigured(AIAgentError):
-    """Raised when the OpenAI key has not been configured in the environment."""
+    """Raised when the selected provider key has not been configured."""
 
 
 COMMON_FILTER_PROPERTIES: dict[str, Any] = {
@@ -149,7 +149,7 @@ Reglas obligatorias:
 
 
 class RetailAIAgent:
-    """Orchestrate OpenAI tool calls while keeping all data access server-side."""
+    """Orchestrate provider tool calls while keeping all data access server-side."""
 
     def __init__(
         self,
@@ -159,15 +159,20 @@ class RetailAIAgent:
         analytics: AnalyticsQueryService,
         api_key: str | None,
         model: str,
+        provider: str = "openai",
         max_tool_rounds: int = 4,
     ) -> None:
         if not api_key:
-            raise AIAgentNotConfigured("OPENAI_API_KEY is not configured")
+            variable = "GEMINI_API_KEY" if provider == "gemini" else "OPENAI_API_KEY"
+            raise AIAgentNotConfigured(f"{variable} no esta configurada")
+        if provider not in {"openai", "gemini"}:
+            raise AIAgentError(f"Proveedor de IA no soportado: {provider}")
         self._session = session
         self._tenant_id = tenant_id
         self._analytics = analytics
         self._api_key = api_key
         self._model = model
+        self._provider = provider
         self._max_tool_rounds = max(1, min(max_tool_rounds, 8))
 
     def ask(
@@ -178,7 +183,7 @@ class RetailAIAgent:
         conversation_id: UUID | None = None,
     ) -> dict[str, Any]:
         conversation_id = self._get_or_create_conversation(conversation_id, message)
-        history = self._load_messages(conversation_id)
+        history = self._load_messages(conversation_id) if self._provider == "openai" else []
         self._insert_message(conversation_id, "user", message)
         input_items: list[Any] = [*history, {"role": "user", "content": message}]
         trace: list[dict[str, Any]] = []
@@ -186,64 +191,34 @@ class RetailAIAgent:
 
         try:
             client = self._client()
-            for _ in range(self._max_tool_rounds):
-                response = client.responses.create(
-                    model=self._model,
-                    instructions=SYSTEM_INSTRUCTIONS,
-                    input=input_items,
-                    tools=TOOLS,
-                    store=False,
+            if self._provider == "gemini":
+                response = self._ask_gemini(
+                    client,
+                    conversation_id,
+                    message,
+                    base_filters,
+                    trace,
                 )
-                function_calls = [
-                    item
-                    for item in response.output
-                    if getattr(item, "type", None) == "function_call"
-                ]
-                if not function_calls:
-                    break
-                input_items.extend(response.output)
-                for call in function_calls:
-                    started = time.perf_counter()
-                    try:
-                        arguments = json.loads(call.arguments or "{}")
-                        output = self._dispatch_tool(call.name, arguments, base_filters)
-                    except (ValueError, TypeError, KeyError) as error:
-                        arguments = _safe_json_loads(call.arguments)
-                        output = {"error": f"No fue posible ejecutar la herramienta: {error}"}
-                    duration_ms = round((time.perf_counter() - started) * 1000)
-                    safe_output = _json_safe(output)
-                    trace.append(
-                        {
-                            "tool": call.name,
-                            "duration_ms": duration_ms,
-                        }
-                    )
-                    self._insert_tool_call(
-                        conversation_id,
-                        call.name,
-                        arguments,
-                        safe_output,
-                        duration_ms,
-                    )
-                    input_items.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": call.call_id,
-                            "output": json.dumps(safe_output, ensure_ascii=False),
-                        }
-                    )
             else:
-                response = None
+                response = self._ask_openai(
+                    client,
+                    conversation_id,
+                    input_items,
+                    base_filters,
+                    trace,
+                )
         except Exception as error:
             self._session.rollback()
-            logger.exception("ai_agent_request_failed tenant_id=%s", self._tenant_id)
-            raise AIAgentError("No fue posible completar el analisis con OpenAI") from error
+            logger.exception(
+                "ai_agent_request_failed tenant_id=%s provider=%s",
+                self._tenant_id,
+                self._provider,
+            )
+            raise AIAgentError(
+                f"No fue posible completar el analisis con {self._provider}"
+            ) from error
 
-        answer = (
-            getattr(response, "output_text", None)
-            if response is not None
-            else None
-        ) or (
+        answer = (getattr(response, "output_text", None) if response is not None else None) or (
             "No pude completar el analisis en el limite de consultas permitido. "
             "Intenta dividir la pregunta en un periodo o tema mas especifico."
         )
@@ -259,6 +234,7 @@ class RetailAIAgent:
         return {
             "conversation_id": str(conversation_id),
             "answer": answer,
+            "provider": self._provider,
             "model": self._model,
             "tools_used": trace,
             "context": {
@@ -269,11 +245,141 @@ class RetailAIAgent:
         }
 
     def _client(self) -> Any:
+        if self._provider == "gemini":
+            try:
+                from google import genai
+            except ImportError as error:
+                raise AIAgentError("La dependencia google-genai no esta instalada") from error
+            return genai.Client(api_key=self._api_key)
         try:
             from openai import OpenAI
         except ImportError as error:
             raise AIAgentError("La dependencia de OpenAI no esta instalada") from error
         return OpenAI(api_key=self._api_key, max_retries=2, timeout=45.0)
+
+    def _ask_openai(
+        self,
+        client: Any,
+        conversation_id: UUID,
+        input_items: list[Any],
+        base_filters: AnalyticsFilters,
+        trace: list[dict[str, Any]],
+    ) -> Any:
+        response: Any = None
+        for _ in range(self._max_tool_rounds):
+            response = client.responses.create(
+                model=self._model,
+                instructions=SYSTEM_INSTRUCTIONS,
+                input=input_items,
+                tools=TOOLS,
+                store=False,
+            )
+            function_calls = [
+                item
+                for item in response.output
+                if getattr(item, "type", None) == "function_call"
+            ]
+            if not function_calls:
+                return response
+            input_items.extend(response.output)
+            for call in function_calls:
+                arguments = _tool_arguments(call.arguments)
+                safe_output, _ = self._execute_tool(
+                    conversation_id,
+                    call.name,
+                    arguments,
+                    base_filters,
+                    trace,
+                )
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call.call_id,
+                        "output": json.dumps(safe_output, ensure_ascii=False),
+                    }
+                )
+        return None
+
+    def _ask_gemini(
+        self,
+        client: Any,
+        conversation_id: UUID,
+        message: str,
+        base_filters: AnalyticsFilters,
+        trace: list[dict[str, Any]],
+    ) -> Any:
+        """Run Gemini 3.6 Flash with the Interactions API and read-only tools."""
+        input_items: list[dict[str, Any]] = [
+            {
+                "type": "user_input",
+                "content": [{"type": "text", "text": message}],
+            }
+        ]
+        previous_id = self._get_provider_conversation_id(conversation_id)
+        response: Any = None
+        for _ in range(self._max_tool_rounds):
+            request: dict[str, Any] = {
+                "model": self._model,
+                "input": input_items,
+                "tools": TOOLS,
+                "system_instruction": SYSTEM_INSTRUCTIONS,
+                "store": True,
+            }
+            if previous_id:
+                request["previous_interaction_id"] = previous_id
+            response = client.interactions.create(**request)
+            previous_id = str(response.id)
+            self._set_provider_conversation_id(conversation_id, previous_id)
+            function_calls = [
+                step
+                for step in response.steps
+                if getattr(step, "type", None) == "function_call"
+            ]
+            if not function_calls:
+                return response
+            input_items = []
+            for call in function_calls:
+                arguments = _tool_arguments(call.arguments)
+                safe_output, _ = self._execute_tool(
+                    conversation_id,
+                    call.name,
+                    arguments,
+                    base_filters,
+                    trace,
+                )
+                input_items.append(
+                    {
+                        "type": "function_result",
+                        "name": call.name,
+                        "call_id": call.id,
+                        "result": [
+                            {
+                                "type": "text",
+                                "text": json.dumps(safe_output, ensure_ascii=False),
+                            }
+                        ],
+                    }
+                )
+        return None
+
+    def _execute_tool(
+        self,
+        conversation_id: UUID,
+        name: str,
+        arguments: dict[str, Any],
+        base_filters: AnalyticsFilters,
+        trace: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], int]:
+        started = time.perf_counter()
+        try:
+            output = self._dispatch_tool(name, arguments, base_filters)
+        except (ValueError, TypeError, KeyError) as error:
+            output = {"error": f"No fue posible ejecutar la herramienta: {error}"}
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        safe_output = _json_safe(output)
+        trace.append({"tool": name, "duration_ms": duration_ms})
+        self._insert_tool_call(conversation_id, name, arguments, safe_output, duration_ms)
+        return safe_output, duration_ms
 
     def _dispatch_tool(
         self,
@@ -366,26 +472,58 @@ class RetailAIAgent:
     def _get_or_create_conversation(self, conversation_id: UUID | None, message: str) -> UUID:
         if conversation_id is not None:
             row = self._session.execute(
-                text("SELECT id FROM ai_conversations WHERE id=:id AND tenant_id=:tenant_id"),
+                text(
+                    "SELECT id, provider FROM ai_conversations "
+                    "WHERE id=:id AND tenant_id=:tenant_id"
+                ),
                 {"id": conversation_id, "tenant_id": self._tenant_id},
             ).first()
             if row is None:
                 raise ValueError("La conversacion no existe para este tenant")
+            if row[1] != self._provider:
+                raise ValueError(
+                    "La conversacion pertenece a otro proveedor de IA; inicia una nueva"
+                )
             return conversation_id
         new_id = uuid4()
         self._session.execute(
             text(
-                "INSERT INTO ai_conversations (id, tenant_id, title, model) "
-                "VALUES (:id, :tenant_id, :title, :model)"
+                "INSERT INTO ai_conversations "
+                "(id, tenant_id, title, provider, model) "
+                "VALUES (:id, :tenant_id, :title, :provider, :model)"
             ),
             {
                 "id": new_id,
                 "tenant_id": self._tenant_id,
                 "title": message.strip()[:200] or "Analisis de negocio",
+                "provider": self._provider,
                 "model": self._model,
             },
         )
         return new_id
+
+    def _get_provider_conversation_id(self, conversation_id: UUID) -> str | None:
+        row = self._session.execute(
+            text(
+                "SELECT provider_conversation_id FROM ai_conversations "
+                "WHERE id=:id AND tenant_id=:tenant_id"
+            ),
+            {"id": conversation_id, "tenant_id": self._tenant_id},
+        ).first()
+        return str(row[0]) if row and row[0] else None
+
+    def _set_provider_conversation_id(self, conversation_id: UUID, provider_id: str) -> None:
+        self._session.execute(
+            text(
+                "UPDATE ai_conversations SET provider_conversation_id=:provider_id "
+                "WHERE id=:id AND tenant_id=:tenant_id"
+            ),
+            {
+                "provider_id": provider_id,
+                "id": conversation_id,
+                "tenant_id": self._tenant_id,
+            },
+        )
 
     def _load_messages(self, conversation_id: UUID) -> list[dict[str, str]]:
         rows = self._session.execute(
@@ -512,6 +650,14 @@ def _safe_json_loads(value: str | None) -> dict[str, Any]:
         return loaded if isinstance(loaded, dict) else {}
     except json.JSONDecodeError:
         return {}
+
+
+def _tool_arguments(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        return _safe_json_loads(value)
+    return {}
 
 
 def _json_safe(value: Any) -> Any:

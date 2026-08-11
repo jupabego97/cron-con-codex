@@ -1,6 +1,6 @@
-# Fase 6 - Copiloto analitico con OpenAI
+# Fase 6 - Copiloto analitico multi-proveedor
 
-El asistente vive en el mismo servicio FastAPI y usa OpenAI como modelo de lenguaje. El navegador nunca entrega credenciales al modelo ni consulta PostgreSQL directamente.
+El asistente vive en el mismo servicio FastAPI y puede usar OpenAI o Gemini como modelo de lenguaje. El navegador nunca entrega credenciales al modelo ni consulta PostgreSQL directamente.
 
 ## Flujo
 
@@ -12,8 +12,9 @@ La primera version es estrictamente de solo lectura. Las herramientas disponible
 
 ## Calidad y seguridad
 
-- OPENAI_API_KEY se configura solamente como variable de entorno del servicio API.
-- OPENAI_MODEL es opcional y por defecto es gpt-4.1-mini.
+- AI_PROVIDER selecciona openai o gemini.
+- OPENAI_API_KEY/OPENAI_MODEL se usan con OpenAI.
+- GEMINI_API_KEY/GEMINI_MODEL se usan con Gemini; el modelo por defecto es gemini-3.6-flash.
 - Todas las consultas se ejecutan con el tenant de la sesion del dashboard.
 - El stock negativo se trata como excepcion y requiere reconciliacion antes de comprar.
 - Las compras anteriores a 2025 no se usan para reconstruir existencias.
@@ -22,4 +23,4 @@ La primera version es estrictamente de solo lectura. Las herramientas disponible
 
 ## Despliegue
 
-La migracion 20260810_14 se aplica mediante el pre-deploy existente (python -m app.cli migrate). En Railway agrega OPENAI_API_KEY al servicio servicio de API y redeploya. No es necesario crear un nuevo servicio para esta fase.
+Las migraciones 20260810_14 y 20260811_15 se aplican mediante el pre-deploy existente (python -m app.cli migrate). En Railway configura el proveedor y su clave en el servicio servicio de API y redeploya. No es necesario crear un nuevo servicio para esta fase.
