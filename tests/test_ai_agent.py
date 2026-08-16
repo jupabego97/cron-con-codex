@@ -79,6 +79,15 @@ class _Analytics:
         return {"status": "succeeded"}
 
 
+class _SalesAnalytics(_Analytics):
+    def sales(self, _filters):
+        return {
+            "summary": [{"currency_code": "COP", "net_sales": "1000"}],
+            "by_hour": [{"hour": 10, "period": "10:00", "currency_code": "COP"}],
+            "time_coverage": [{"currency_code": "COP", "documents_with_time": 1}],
+        }
+
+
 class _Call:
     type = "function_call"
     name = "get_data_status"
@@ -130,6 +139,31 @@ def test_agent_executes_tools_before_returning_answer() -> None:
     assert result["tools_used"][0]["tool"] == "get_data_status"
     assert client.responses.calls == 2
     assert session.commits == 1
+
+
+def test_sales_tool_exposes_business_hours_to_the_agent() -> None:
+    agent = RetailAIAgent(
+        session=_Session(),
+        tenant_id=UUID("23332716-6b46-41d4-bc9b-03613fbab6df"),
+        analytics=_SalesAnalytics(),
+        api_key="test-key",
+        model="test-model",
+    )
+
+    result = agent._dispatch_tool(
+        "get_sales_analysis",
+        {},
+        AnalyticsFilters(from_date=date(2026, 8, 1), to_date=date(2026, 8, 15)),
+    )
+
+    assert result["by_hour"][0]["period"] == "10:00"
+    assert result["time_coverage"][0]["documents_with_time"] == 1
+    assert result["business_hours"] == {
+        "timezone": "America/Bogota",
+        "opens_at": "10:00",
+        "closes_at": "20:00",
+        "included_hour_buckets": "10:00-19:00",
+    }
 
 
 class _GeminiCall:

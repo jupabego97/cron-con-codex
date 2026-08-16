@@ -92,6 +92,9 @@ def test_sales_hour_query_does_not_create_a_bind_for_clock_separator() -> None:
     statement = str(captured["statement"])
     assert "chr(58)" in statement
     assert ":00" not in statement
+    assert "generate_series(10, 19)" in statement
+    assert "sale_hour_local >= 10" in statement
+    assert "sale_hour_local < 20" in statement
 
 
 def test_replenishment_policies_have_tenant_scoped_tables() -> None:

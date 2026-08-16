@@ -10,6 +10,10 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+BUSINESS_TIMEZONE = "America/Bogota"
+BUSINESS_OPEN_HOUR = 10
+BUSINESS_CLOSE_HOUR = 20
+
 
 @dataclass(frozen=True)
 class AnalyticsFilters:
@@ -2220,16 +2224,38 @@ class AnalyticsQueryService:
         where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
         return self._rows(
             f"""
-            SELECT EXTRACT(HOUR FROM f.issued_at AT TIME ZONE 'America/Bogota')::smallint AS hour,
-                   lpad(EXTRACT(HOUR FROM f.issued_at AT TIME ZONE 'America/Bogota')::text, 2, '0') || chr(58) || '00' AS period,
-                   f.currency_code,
-                   COALESCE(sum(f.net_sales_amount), 0) AS amount,
-                   COALESCE(sum(f.quantity), 0) AS units,
-                   count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents
-            FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
-            WHERE {where} AND f.issued_at IS NOT NULL
-            GROUP BY hour, period, f.currency_code
-            ORDER BY hour, f.currency_code
+            WITH business_hours AS (
+                SELECT generate_series({BUSINESS_OPEN_HOUR}, {BUSINESS_CLOSE_HOUR - 1}) AS hour
+            ),
+            currencies AS (
+                SELECT DISTINCT f.currency_code
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+                WHERE {where} AND f.currency_code IS NOT NULL
+            ),
+            hourly AS (
+                SELECT f.sale_hour_local AS hour,
+                       f.currency_code,
+                       COALESCE(sum(f.net_sales_amount), 0) AS amount,
+                       COALESCE(sum(f.quantity), 0) AS units,
+                       count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+                WHERE {where}
+                  AND f.issued_at IS NOT NULL
+                  AND f.sale_hour_local >= {BUSINESS_OPEN_HOUR}
+                  AND f.sale_hour_local < {BUSINESS_CLOSE_HOUR}
+                GROUP BY f.sale_hour_local, f.currency_code
+            )
+            SELECT business_hours.hour,
+                   lpad(business_hours.hour::text, 2, '0') || chr(58) || '00' AS period,
+                   currencies.currency_code,
+                   COALESCE(hourly.amount, 0) AS amount,
+                   COALESCE(hourly.units, 0) AS units,
+                   COALESCE(hourly.documents, 0) AS documents
+            FROM business_hours CROSS JOIN currencies
+            LEFT JOIN hourly
+              ON hourly.hour = business_hours.hour
+             AND hourly.currency_code = currencies.currency_code
+            ORDER BY business_hours.hour, currencies.currency_code
             """,
             params,
         )
@@ -2244,7 +2270,22 @@ class AnalyticsQueryService:
                    count(*) FILTER (WHERE f.issued_at IS NULL) AS lines_without_time,
                    count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
                    count(DISTINCT (f.document_type, f.document_alegra_id))
-                     FILTER (WHERE f.issued_at IS NOT NULL) AS documents_with_time
+                     FILTER (WHERE f.issued_at IS NOT NULL) AS documents_with_time,
+                   count(*) FILTER (
+                     WHERE f.issued_at IS NOT NULL
+                       AND (f.sale_hour_local < {BUSINESS_OPEN_HOUR}
+                            OR f.sale_hour_local >= {BUSINESS_CLOSE_HOUR})
+                   ) AS lines_outside_business_hours,
+                   count(DISTINCT (f.document_type, f.document_alegra_id)) FILTER (
+                     WHERE f.issued_at IS NOT NULL
+                       AND (f.sale_hour_local < {BUSINESS_OPEN_HOUR}
+                            OR f.sale_hour_local >= {BUSINESS_CLOSE_HOUR})
+                   ) AS documents_outside_business_hours,
+                   COALESCE(sum(f.net_sales_amount) FILTER (
+                     WHERE f.issued_at IS NOT NULL
+                       AND (f.sale_hour_local < {BUSINESS_OPEN_HOUR}
+                            OR f.sale_hour_local >= {BUSINESS_CLOSE_HOUR})
+                   ), 0) AS amount_outside_business_hours
             FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
             WHERE {where}
             GROUP BY f.currency_code

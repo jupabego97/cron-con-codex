@@ -13,7 +13,13 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.services.analytics_queries import AnalyticsFilters, AnalyticsQueryService
+from app.services.analytics_queries import (
+    BUSINESS_CLOSE_HOUR,
+    BUSINESS_OPEN_HOUR,
+    BUSINESS_TIMEZONE,
+    AnalyticsFilters,
+    AnalyticsQueryService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +84,10 @@ TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "name": "get_sales_analysis",
         "description": (
-            "Analiza ventas netas, unidades, documentos, margen, productos y proveedores asociados."
+            "Analiza ventas netas, unidades, documentos, margen, productos y "
+            "proveedores asociados. "
+            "Incluye ventas por hora comercial de 10:00 a 20:00 en America/Bogota; "
+            "la hora 20:00 es el limite de cierre y no se considera una franja operativa."
         ),
         "parameters": _filter_schema(),
     },
@@ -138,6 +147,10 @@ Reglas obligatorias:
   de emitir una compra. Nunca lo conviertas automaticamente en unidades
   adicionales a comprar.
 - No mezcles monedas en un mismo KPI. Indica la moneda de cada importe.
+- El horario comercial es de 10:00 a 20:00 en America/Bogota. La tabla por hora
+  usa las franjas 10:00–19:00; 20:00 es el limite exclusivo de cierre. Usa esa
+  tabla para analizar demanda por hora y menciona si existen ventas fuera de
+  horario, que quedan fuera de la distribución comercial.
 - Las notas credito hacen negativa la venta neta y deben conservarse asi.
 - No ejecutes acciones, no modifiques Alegra, no cambies inventario y no
   presentes una compra como aprobada. Solo puedes analizar y recomendar.
@@ -426,6 +439,8 @@ class RetailAIAgent:
                 keys=(
                     "summary",
                     "series",
+                    "by_hour",
+                    "time_coverage",
                     "by_product",
                     "by_seller",
                     "by_warehouse",
@@ -433,7 +448,17 @@ class RetailAIAgent:
                     "modal_supplier_detail",
                     "cost_supplier_detail",
                 ),
-            ) | {"filters": _filter_summary(filters)}
+            ) | {
+                "filters": _filter_summary(filters),
+                "business_hours": {
+                    "timezone": BUSINESS_TIMEZONE,
+                    "opens_at": f"{BUSINESS_OPEN_HOUR:02d}:00",
+                    "closes_at": f"{BUSINESS_CLOSE_HOUR:02d}:00",
+                    "included_hour_buckets": (
+                        f"{BUSINESS_OPEN_HOUR:02d}:00-{BUSINESS_CLOSE_HOUR - 1:02d}:00"
+                    ),
+                },
+            }
         if name == "get_purchase_supplier_analysis":
             purchases = self._analytics.purchases(filters)
             suppliers = self._analytics.suppliers(filters)

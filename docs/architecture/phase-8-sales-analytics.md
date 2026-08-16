@@ -30,9 +30,16 @@ La factura conserva dos niveles de tiempo:
   calculada para `America/Bogota`.
 
 El reporte de Ventas muestra una serie por hora local únicamente con documentos
-que tienen hora disponible y muestra la cobertura de esa hora. Las notas crédito
-siguen afectando la venta neta por su fecha contable; como la proyección actual de
-notas crédito no expone hora, no se inventa una hora para ellas.
+que tienen hora disponible. La serie comercial usa las franjas `10:00` a `19:00`;
+`20:00` es el límite exclusivo de cierre y no se incluye como hora operativa.
+Las horas se muestran aunque tengan cero ventas para que el patrón no dependa de
+que exista un registro en cada hora. Las notas crédito siguen afectando la venta
+neta por su fecha contable; como la proyección actual de notas crédito no expone
+hora, no se inventa una hora para ellas.
+
+El agente IA recibe `by_hour`, `time_coverage` y los metadatos del horario dentro
+de `get_sales_analysis`; por tanto puede responder preguntas sobre concentración
+de ventas en el horario comercial sin consultar PostgreSQL directamente.
 
 
 ## Ventas por proveedor
