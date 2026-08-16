@@ -682,6 +682,7 @@ function ReplenishmentOpportunityTable({ title, rows, coverage = false }: { titl
 
 function SalesReports({ data }: { data: Record<string, unknown> }) {
   const summary = (data.summary || []) as Row[];
+  const timeCoverage = (data.time_coverage || []) as Row[];
   const families = (data.by_family_detail || []) as Row[];
   const products = (data.product_detail || []) as Row[];
   const sellers = (data.seller_detail || []) as Row[];
@@ -705,6 +706,8 @@ function SalesReports({ data }: { data: Record<string, unknown> }) {
       </article>;
     })}</section>
     <Chart title="Ventas en el tiempo" data={(data.series || []) as Row[]} dataKey="amount" moneyValue />
+    <Chart title="Ventas por hora local (America/Bogota)" data={(data.by_hour || []) as Row[]} dataKey="amount" moneyValue />
+    {timeCoverage.map((row) => <p className="muted" key={`time-${String(row.currency_code || "COP")}`}>Hora disponible para {number(row.documents_with_time)} de {number(row.documents)} documentos ({percent(row.documents ? (Number(row.documents_with_time || 0) / Number(row.documents)) * 100 : 0)}). Las notas crédito u otros documentos sin hora se mantienen en sus totales diarios.</p>)}
     <Chart title="Ventas por familia" data={familyChart} dataKey="net_sales" moneyValue />
     <section className="table-card"><h3>Productos más vendidos</h3>{products.length ? <table><thead><tr><th>Producto</th><th>Familia</th><th>Venta neta</th><th>Participación</th><th>Unidades</th><th>Documentos</th><th>Precio promedio</th><th>Margen %</th><th>Última venta</th></tr></thead><tbody>{products.slice(0, 100).map((row, index) => <tr key={`${row.product}-${index}`}><td>{String(row.product)}{row.reference ? ` · ${String(row.reference)}` : ""}</td><td>{String(row.family)}</td><td>{money(row.net_sales, String(row.currency_code || "COP"))}</td><td>{percent(row.share_pct)}</td><td>{number(row.units)}</td><td>{number(row.documents)}</td><td>{money(row.average_unit_sale, String(row.currency_code || "COP"))}</td><td>{percent(row.gross_margin_pct)}</td><td>{String(row.last_sale_date || "")}</td></tr>)}</tbody></table> : <p className="muted">Sin ventas para estos filtros.</p>}</section>
     <section className="table-card"><h3>Ventas por familia</h3>{families.length ? <table><thead><tr><th>Familia</th><th>Venta neta</th><th>Participación</th><th>Unidades</th><th>Documentos</th><th>Productos</th><th>Margen %</th></tr></thead><tbody>{families.map((row, index) => <tr key={`${row.family}-${index}`}><td>{String(row.family)}</td><td>{money(row.net_sales, String(row.currency_code || "COP"))}</td><td>{percent(row.share_pct)}</td><td>{number(row.units)}</td><td>{number(row.documents)}</td><td>{number(row.product_count)}</td><td>{percent(row.gross_margin_pct)}</td></tr>)}</tbody></table> : <p className="muted">Sin familias para estos filtros.</p>}</section>

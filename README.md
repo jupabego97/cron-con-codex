@@ -124,6 +124,11 @@ moneda en el mart. Consulta `docs/architecture/phase-5-dashboard.md` y
 
 Configuración del proveedor del asistente: usa `AI_PROVIDER=openai` con `OPENAI_API_KEY`, o `AI_PROVIDER=gemini` con `GEMINI_API_KEY`. Para Gemini 3.6 Flash, configura `GEMINI_MODEL=gemini-3.6-flash`. Las claves deben existir solo como variables del servicio API en Railway. La migración `20260811_15` guarda el proveedor y el identificador de conversación externo.
 
+El reporte de Ventas conserva la hora de emisión de las facturas y muestra una
+distribución por hora local (`America/Bogota`). Después de desplegar la migración
+correspondiente, ejecuta una vez `python -m app.cli refresh-mart <tenant-uuid>`
+para poblar `fact_sales_line.issued_at` y `sale_hour_local`.
+
 ## Documentación
 
 - [Fase 0](docs/architecture/phase-0.md)

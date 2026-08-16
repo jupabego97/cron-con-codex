@@ -181,12 +181,17 @@ _FACTS = (
     text(
         """
         INSERT INTO fact_sales_line
-          (tenant_id, tenant_key, date_key, product_key, contact_key, seller_key, warehouse_key,
+          (tenant_id, tenant_key, date_key, issued_at, sale_hour_local,
+           product_key, contact_key, seller_key, warehouse_key,
            document_type, document_alegra_id, document_number, document_status, line_number,
            currency_code, quantity, unit_price, discount_amount, tax_amount, net_sales_amount,
            unit_cost, margin_amount, is_deleted)
         SELECT si.tenant_id, dt.key,
-               to_char(si.issue_date, 'YYYYMMDD')::integer, dp.key, dc.key, ds.key, NULL,
+               to_char(si.issue_date, 'YYYYMMDD')::integer, si.issued_at,
+               CASE WHEN si.issued_at IS NOT NULL
+                 THEN EXTRACT(HOUR FROM si.issued_at AT TIME ZONE 'America/Bogota')::smallint
+               END,
+               dp.key, dc.key, ds.key, NULL,
                'invoice', si.alegra_id, si.alegra_id, si.status, sil.line_number,
                COALESCE(si.currency_code, :default_currency_code), COALESCE(sil.quantity, 0), sil.unit_price, 0, 0,
                COALESCE(sil.line_total, 0), NULL::numeric(18, 2), NULL::numeric(18, 2),
@@ -200,7 +205,8 @@ _FACTS = (
         WHERE si.tenant_id = :tenant_id
         UNION ALL
         SELECT cn.tenant_id, dt.key,
-               to_char(cn.issue_date, 'YYYYMMDD')::integer, dp.key, dc.key, NULL, dw.key,
+               to_char(cn.issue_date, 'YYYYMMDD')::integer, NULL::timestamptz, NULL::smallint,
+               dp.key, dc.key, NULL, dw.key,
                'credit_note', cn.alegra_id, cn.document_number, cn.status, cnl.line_number,
                COALESCE(cn.currency_code, :default_currency_code), -COALESCE(cnl.quantity, 0), cnl.unit_price, 0, 0,
                -COALESCE(cnl.line_total, 0), NULL::numeric(18, 2), NULL::numeric(18, 2),

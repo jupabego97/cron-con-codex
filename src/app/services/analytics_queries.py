@@ -115,6 +115,8 @@ class AnalyticsQueryService:
         return {
             "summary": self._sales_metrics(filters),
             "series": self._sales_series(filters),
+            "by_hour": self._sales_by_hour(filters),
+            "time_coverage": self._sales_time_coverage(filters),
             "by_product": self._sales_breakdown(filters, "product"),
             "by_seller": self._sales_breakdown(filters, "seller"),
             "by_warehouse": self._sales_breakdown(filters, "warehouse"),
@@ -2210,6 +2212,43 @@ class AnalyticsQueryService:
                    COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin
             FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
             WHERE {where} GROUP BY period, f.currency_code ORDER BY period, f.currency_code
+            """,
+            params,
+        )
+
+    def _sales_by_hour(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        return self._rows(
+            f"""
+            SELECT EXTRACT(HOUR FROM f.issued_at AT TIME ZONE 'America/Bogota')::smallint AS hour,
+                   lpad(EXTRACT(HOUR FROM f.issued_at AT TIME ZONE 'America/Bogota')::text, 2, '0') || ':00' AS period,
+                   f.currency_code,
+                   COALESCE(sum(f.net_sales_amount), 0) AS amount,
+                   COALESCE(sum(f.quantity), 0) AS units,
+                   count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents
+            FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+            WHERE {where} AND f.issued_at IS NOT NULL
+            GROUP BY hour, period, f.currency_code
+            ORDER BY hour, f.currency_code
+            """,
+            params,
+        )
+
+    def _sales_time_coverage(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        return self._rows(
+            f"""
+            SELECT f.currency_code,
+                   count(*) AS lines,
+                   count(*) FILTER (WHERE f.issued_at IS NOT NULL) AS lines_with_time,
+                   count(*) FILTER (WHERE f.issued_at IS NULL) AS lines_without_time,
+                   count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
+                   count(DISTINCT (f.document_type, f.document_alegra_id))
+                     FILTER (WHERE f.issued_at IS NOT NULL) AS documents_with_time
+            FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+            WHERE {where}
+            GROUP BY f.currency_code
+            ORDER BY f.currency_code
             """,
             params,
         )

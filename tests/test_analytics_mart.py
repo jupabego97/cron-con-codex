@@ -34,6 +34,9 @@ def test_purchase_line_repair_is_available_as_a_tenant_scoped_command() -> None:
 def test_mart_queries_include_credit_notes_and_balanced_transfer_movements() -> None:
     statements = "\n".join(str(statement) for statement in _FACTS)
 
+    assert "issued_at" in statements
+    assert "sale_hour_local" in statements
+    assert "AT TIME ZONE 'America/Bogota'" in statements
     assert "credit_note" in statements
     assert "-COALESCE(cnl.quantity, 0)" in statements
     assert "transfer_out" in statements
@@ -53,6 +56,22 @@ def test_mart_queries_include_credit_notes_and_balanced_transfer_movements() -> 
     assert "row_number()" in derived
     assert "supplier_product_stats" in derived
     assert "frequency_rank" in derived
+
+
+def test_sales_time_grain_migration_adds_nullable_timestamp_and_local_hour() -> None:
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / "migrations"
+        / "versions"
+        / "20260815_16_sales_time_grain.py"
+    )
+    migration = migration_path.read_text()
+
+    assert 'revision = "20260815_16"' in migration
+    assert 'down_revision = "20260811_15"' in migration
+    assert 'sa.Column("issued_at", sa.DateTime(timezone=True), nullable=True)' in migration
+    assert 'sa.Column("sale_hour_local", sa.SmallInteger(), nullable=True)' in migration
+    assert '"ix_fact_sales_line_tenant_issued_at"' in migration
 
 
 def test_replenishment_policies_have_tenant_scoped_tables() -> None:

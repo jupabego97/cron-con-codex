@@ -19,6 +19,21 @@ vendedor, estado, producto y bodega permanecen restringidos al tenant configurad
 Las consultas están limitadas a agregados para el tablero; no exponen payloads
 crudos ni líneas completas de Alegra.
 
+## Granularidad temporal
+
+La factura conserva dos niveles de tiempo:
+
+- `sales_invoices.issue_date` mantiene la fecha contable usada para cuadrar
+  totales diarios, mensuales y notas crédito.
+- `sales_invoices.issued_at` conserva la fecha y hora reportadas por Alegra; el
+  mart la proyecta en `fact_sales_line.issued_at` y en `sale_hour_local`,
+  calculada para `America/Bogota`.
+
+El reporte de Ventas muestra una serie por hora local únicamente con documentos
+que tienen hora disponible y muestra la cobertura de esa hora. Las notas crédito
+siguen afectando la venta neta por su fecha contable; como la proyección actual de
+notas crédito no expone hora, no se inventa una hora para ellas.
+
 
 ## Ventas por proveedor
 
