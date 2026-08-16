@@ -362,6 +362,17 @@ function AIAssistant({ filters }: { filters: Filters }) {
       .catch(() => setAiConfig({ configured: false }));
   }, []);
 
+  useEffect(() => {
+    setConversationId(null);
+    setError(null);
+    setMessages([
+      {
+        role: "assistant",
+        content: `Nuevo contexto analítico: ${filters.from_date} a ${filters.to_date}. Puedo revisar inventario, reposición, ventas, compras, proveedores, pagos y KPIs con este período.`,
+      },
+    ]);
+  }, [filters.from_date, filters.to_date, filters.currency, filters.product_key, filters.seller_key, filters.warehouse_key, filters.document_status, filters.family, filters.provider_key]);
+
   async function ask(question: string) {
     const message = question.trim();
     if (!message || loading || aiConfig?.configured === false) return;
