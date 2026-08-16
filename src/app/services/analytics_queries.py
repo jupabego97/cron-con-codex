@@ -2221,7 +2221,7 @@ class AnalyticsQueryService:
         return self._rows(
             f"""
             SELECT EXTRACT(HOUR FROM f.issued_at AT TIME ZONE 'America/Bogota')::smallint AS hour,
-                   lpad(EXTRACT(HOUR FROM f.issued_at AT TIME ZONE 'America/Bogota')::text, 2, '0') || ':00' AS period,
+                   lpad(EXTRACT(HOUR FROM f.issued_at AT TIME ZONE 'America/Bogota')::text, 2, '0') || chr(58) || '00' AS period,
                    f.currency_code,
                    COALESCE(sum(f.net_sales_amount), 0) AS amount,
                    COALESCE(sum(f.quantity), 0) AS units,

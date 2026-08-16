@@ -1,7 +1,9 @@
+from datetime import date
 from pathlib import Path
 
 from app.cli import build_parser
 from app.services.analytics_mart import _DERIVED, _DIMENSIONS, _FACTS
+from app.services.analytics_queries import AnalyticsFilters, AnalyticsQueryService
 
 
 def test_refresh_mart_is_available_as_a_tenant_scoped_command() -> None:
@@ -72,6 +74,24 @@ def test_sales_time_grain_migration_adds_nullable_timestamp_and_local_hour() -> 
     assert 'sa.Column("issued_at", sa.DateTime(timezone=True), nullable=True)' in migration
     assert 'sa.Column("sale_hour_local", sa.SmallInteger(), nullable=True)' in migration
     assert '"ix_fact_sales_line_tenant_issued_at"' in migration
+
+
+def test_sales_hour_query_does_not_create_a_bind_for_clock_separator() -> None:
+    service = AnalyticsQueryService.__new__(AnalyticsQueryService)
+    captured: dict[str, object] = {}
+    service._fact_where = lambda filters, **kwargs: (  # type: ignore[method-assign]
+        "f.tenant_id = :tenant_id",
+        {"tenant_id": "tenant"},
+    )
+    service._rows = lambda statement, params: captured.update(  # type: ignore[method-assign]
+        {"statement": statement, "params": params}
+    ) or []
+
+    service._sales_by_hour(AnalyticsFilters(from_date=date(2026, 1, 1), to_date=date(2026, 1, 31)))
+
+    statement = str(captured["statement"])
+    assert "chr(58)" in statement
+    assert ":00" not in statement
 
 
 def test_replenishment_policies_have_tenant_scoped_tables() -> None:
