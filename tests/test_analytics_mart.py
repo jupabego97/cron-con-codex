@@ -112,6 +112,31 @@ def test_sales_hour_query_does_not_create_a_bind_for_clock_separator() -> None:
     assert "sale_hour_local < 20" in statement
 
 
+def test_sales_weekday_hour_query_exposes_sunday_and_business_hours() -> None:
+    service = AnalyticsQueryService.__new__(AnalyticsQueryService)
+    captured: dict[str, object] = {}
+    service._fact_where = lambda filters, **kwargs: (  # type: ignore[method-assign]
+        "f.tenant_id = :tenant_id",
+        {"tenant_id": "tenant"},
+    )
+    service._rows = lambda statement, params: captured.update(  # type: ignore[method-assign]
+        {"statement": statement, "params": params}
+    ) or []
+
+    service._sales_by_weekday_hour(
+        AnalyticsFilters(from_date=date(2026, 1, 1), to_date=date(2026, 1, 31))
+    )
+
+    statement = str(captured["statement"])
+    assert "generate_series(1, 7)" in statement
+    assert "generate_series(10, 19)" in statement
+    assert "d.day_of_week" in statement
+    assert "WHEN 7 THEN 'domingo'" in statement
+    assert "sale_hour_local >= 10" in statement
+    assert "sale_hour_local < 20" in statement
+    assert "chr(58)" in statement
+
+
 def test_replenishment_policies_have_tenant_scoped_tables() -> None:
     migration_path = (
         Path(__file__).resolve().parents[1]

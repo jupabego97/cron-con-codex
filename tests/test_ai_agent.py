@@ -96,6 +96,10 @@ class _SalesAnalytics(_Analytics):
         return {
             "summary": [{"currency_code": "COP", "net_sales": "1000"}],
             "by_hour": [{"hour": 10, "period": "10:00", "currency_code": "COP"}],
+            "by_weekday": [{"weekday": "domingo", "amount": "1000", "currency_code": "COP"}],
+            "by_weekday_hour": [
+                {"weekday": "domingo", "period": "10:00", "currency_code": "COP"}
+            ],
             "time_coverage": [{"currency_code": "COP", "documents_with_time": 1}],
         }
 
@@ -169,6 +173,8 @@ def test_sales_tool_exposes_business_hours_to_the_agent() -> None:
     )
 
     assert result["by_hour"][0]["period"] == "10:00"
+    assert result["by_weekday"][0]["weekday"] == "domingo"
+    assert result["by_weekday_hour"][0]["weekday"] == "domingo"
     assert result["time_coverage"][0]["documents_with_time"] == 1
     assert result["business_hours"] == {
         "timezone": "America/Bogota",

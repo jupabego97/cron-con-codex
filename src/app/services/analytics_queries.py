@@ -135,6 +135,8 @@ class AnalyticsQueryService:
             "summary": self._sales_metrics(filters),
             "series": self._sales_series(filters),
             "by_hour": self._sales_by_hour(filters),
+            "by_weekday": self._sales_by_weekday(filters),
+            "by_weekday_hour": self._sales_by_weekday_hour(filters),
             "time_coverage": self._sales_time_coverage(filters),
             "by_product": self._sales_breakdown(filters, "product"),
             "by_seller": self._sales_breakdown(filters, "seller"),
@@ -2271,6 +2273,109 @@ class AnalyticsQueryService:
               ON hourly.hour = business_hours.hour
              AND hourly.currency_code = currencies.currency_code
             ORDER BY business_hours.hour, currencies.currency_code
+            """,
+            params,
+        )
+
+    def _sales_by_weekday(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        return self._rows(
+            f"""
+            WITH weekdays AS (
+                SELECT generate_series(1, 7) AS weekday_number
+            ),
+            currencies AS (
+                SELECT DISTINCT f.currency_code
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+                WHERE {where} AND f.currency_code IS NOT NULL
+            ),
+            daily AS (
+                SELECT d.day_of_week AS weekday_number,
+                       f.currency_code,
+                       COALESCE(sum(f.net_sales_amount), 0) AS amount,
+                       COALESCE(sum(f.quantity), 0) AS units,
+                       count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+                WHERE {where}
+                  AND f.issued_at IS NOT NULL
+                  AND f.sale_hour_local >= {BUSINESS_OPEN_HOUR}
+                  AND f.sale_hour_local < {BUSINESS_CLOSE_HOUR}
+                GROUP BY d.day_of_week, f.currency_code
+            )
+            SELECT weekdays.weekday_number,
+                   CASE weekdays.weekday_number
+                     WHEN 1 THEN 'lunes'
+                     WHEN 2 THEN 'martes'
+                     WHEN 3 THEN 'miercoles'
+                     WHEN 4 THEN 'jueves'
+                     WHEN 5 THEN 'viernes'
+                     WHEN 6 THEN 'sabado'
+                     WHEN 7 THEN 'domingo'
+                   END AS weekday,
+                   currencies.currency_code,
+                   COALESCE(daily.amount, 0) AS amount,
+                   COALESCE(daily.units, 0) AS units,
+                   COALESCE(daily.documents, 0) AS documents
+            FROM weekdays CROSS JOIN currencies
+            LEFT JOIN daily
+              ON daily.weekday_number = weekdays.weekday_number
+             AND daily.currency_code = currencies.currency_code
+            ORDER BY weekdays.weekday_number, currencies.currency_code
+            """,
+            params,
+        )
+
+    def _sales_by_weekday_hour(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        return self._rows(
+            f"""
+            WITH weekdays AS (
+                SELECT generate_series(1, 7) AS weekday_number
+            ),
+            business_hours AS (
+                SELECT generate_series({BUSINESS_OPEN_HOUR}, {BUSINESS_CLOSE_HOUR - 1}) AS hour
+            ),
+            currencies AS (
+                SELECT DISTINCT f.currency_code
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+                WHERE {where} AND f.currency_code IS NOT NULL
+            ),
+            hourly AS (
+                SELECT d.day_of_week AS weekday_number,
+                       f.sale_hour_local AS hour,
+                       f.currency_code,
+                       COALESCE(sum(f.net_sales_amount), 0) AS amount,
+                       COALESCE(sum(f.quantity), 0) AS units,
+                       count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents
+                FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+                WHERE {where}
+                  AND f.issued_at IS NOT NULL
+                  AND f.sale_hour_local >= {BUSINESS_OPEN_HOUR}
+                  AND f.sale_hour_local < {BUSINESS_CLOSE_HOUR}
+                GROUP BY d.day_of_week, f.sale_hour_local, f.currency_code
+            )
+            SELECT weekdays.weekday_number,
+                   CASE weekdays.weekday_number
+                     WHEN 1 THEN 'lunes'
+                     WHEN 2 THEN 'martes'
+                     WHEN 3 THEN 'miercoles'
+                     WHEN 4 THEN 'jueves'
+                     WHEN 5 THEN 'viernes'
+                     WHEN 6 THEN 'sabado'
+                     WHEN 7 THEN 'domingo'
+                   END AS weekday,
+                   business_hours.hour,
+                   lpad(business_hours.hour::text, 2, '0') || chr(58) || '00' AS period,
+                   currencies.currency_code,
+                   COALESCE(hourly.amount, 0) AS amount,
+                   COALESCE(hourly.units, 0) AS units,
+                   COALESCE(hourly.documents, 0) AS documents
+            FROM weekdays CROSS JOIN business_hours CROSS JOIN currencies
+            LEFT JOIN hourly
+              ON hourly.weekday_number = weekdays.weekday_number
+             AND hourly.hour = business_hours.hour
+             AND hourly.currency_code = currencies.currency_code
+            ORDER BY weekdays.weekday_number, business_hours.hour, currencies.currency_code
             """,
             params,
         )

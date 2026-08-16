@@ -87,7 +87,9 @@ TOOLS: list[dict[str, Any]] = [
             "Analiza ventas netas, unidades, documentos, margen, productos y "
             "proveedores asociados. "
             "Incluye ventas por hora comercial de 10:00 a 20:00 en America/Bogota; "
-            "la hora 20:00 es el limite de cierre y no se considera una franja operativa."
+            "la hora 20:00 es el limite de cierre y no se considera una franja operativa. "
+            "Incluye tablas por dia de semana y por combinacion dia-hora; usa "
+            "by_weekday_hour para preguntas como ventas del domingo por hora."
         ),
         "parameters": _filter_schema(),
     },
@@ -149,8 +151,10 @@ Reglas obligatorias:
 - No mezcles monedas en un mismo KPI. Indica la moneda de cada importe.
 - El horario comercial es de 10:00 a 20:00 en America/Bogota. La tabla por hora
   usa las franjas 10:00–19:00; 20:00 es el limite exclusivo de cierre. Usa esa
-  tabla para analizar demanda por hora y menciona si existen ventas fuera de
-  horario, que quedan fuera de la distribución comercial.
+  tabla para analizar demanda por hora. Para una pregunta sobre un dia concreto,
+  usa by_weekday_hour y filtra las filas cuyo weekday coincida con ese dia.
+  Menciona si existen ventas fuera de horario, que quedan fuera de la
+  distribución comercial.
 - Las notas credito hacen negativa la venta neta y deben conservarse asi.
 - No ejecutes acciones, no modifiques Alegra, no cambies inventario y no
   presentes una compra como aprobada. Solo puedes analizar y recomendar.
@@ -440,6 +444,8 @@ class RetailAIAgent:
                     "summary",
                     "series",
                     "by_hour",
+                    "by_weekday",
+                    "by_weekday_hour",
                     "time_coverage",
                     "by_product",
                     "by_seller",
@@ -448,6 +454,7 @@ class RetailAIAgent:
                     "modal_supplier_detail",
                     "cost_supplier_detail",
                 ),
+                list_limits={"by_weekday_hour": 200},
             ) | {
                 "filters": _filter_summary(filters),
                 "business_hours": {
@@ -658,12 +665,15 @@ def _filter_summary(filters: AnalyticsFilters) -> dict[str, Any]:
 
 
 def _compact_dataset(
-    data: dict[str, Any], *, keys: tuple[str, ...] | None = None
+    data: dict[str, Any],
+    *,
+    keys: tuple[str, ...] | None = None,
+    list_limits: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     selected = {key: data.get(key) for key in (keys or tuple(data)) if key in data}
     for key, value in selected.items():
         if isinstance(value, list):
-            selected[key] = value[:50]
+            selected[key] = value[: (list_limits or {}).get(key, 50)]
     return selected
 
 
