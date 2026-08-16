@@ -51,8 +51,6 @@ def _context_filters(context: AIContextPayload | None) -> AnalyticsFilters:
     )
     if filters.from_date > filters.to_date:
         raise HTTPException(status_code=422, detail="El rango de fechas no es valido")
-    if (filters.to_date - filters.from_date).days > 730:
-        raise HTTPException(status_code=422, detail="El rango maximo del asistente es de 731 dias")
     return filters
 
 

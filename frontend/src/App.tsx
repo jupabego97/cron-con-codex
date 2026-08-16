@@ -75,14 +75,26 @@ const tabs: Array<[Tab, string]> = [
 ];
 
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function shiftDateIso(value: string, days: number): string {
+  const [year, month, day] = value.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day));
+  shifted.setUTCDate(shifted.getUTCDate() + days);
+  return shifted.toISOString().slice(0, 10);
 }
 
 function initialFilters(): Filters {
-  const today = new Date();
-  const previous = new Date(today);
-  previous.setDate(today.getDate() - 29);
-  return { from_date: previous.toISOString().slice(0, 10), to_date: todayIso() };
+  const to = todayIso();
+  return { from_date: shiftDateIso(to, -29), to_date: to };
 }
 
 export default function App() {
@@ -201,18 +213,22 @@ function Login({ onLogin }: { onLogin: () => void }) {
 function FiltersBar({ filters, setFilters, options }: { filters: Filters; setFilters: (value: Filters) => void; options: FilterData | null }) {
   const update = (field: keyof Filters, value: string) => setFilters({ ...filters, [field]: value || undefined });
   const quickRange = (days: number) => {
-    const to = new Date();
-    const from = new Date(to);
-    from.setDate(to.getDate() - (days - 1));
-    setFilters({ ...filters, from_date: from.toISOString().slice(0, 10), to_date: to.toISOString().slice(0, 10) });
+    const to = todayIso();
+    setFilters({ ...filters, from_date: shiftDateIso(to, -(days - 1)), to_date: to });
+  };
+  const historyFrom = options?.date_range.min_date;
+  const historyTo = options?.date_range.max_date;
+  const useFullHistory = () => {
+    if (historyFrom && historyTo) setFilters({ ...filters, from_date: historyFrom, to_date: historyTo });
   };
   return (
     <section className="filters">
-      <div className="quick-ranges">
+      <div className="quick-ranges" aria-label="Rangos rápidos">
         {[30, 90, 365].map((days) => <button key={days} onClick={() => quickRange(days)}>Últimos {days} días</button>)}
+        <button onClick={useFullHistory} disabled={!historyFrom || !historyTo}>Toda la historia</button>
       </div>
-      <label>Desde<input type="date" value={filters.from_date} onChange={(event) => update("from_date", event.target.value)} /></label>
-      <label>Hasta<input type="date" value={filters.to_date} onChange={(event) => update("to_date", event.target.value)} /></label>
+      <label>Desde<input type="date" min={historyFrom} max={historyTo || todayIso()} value={filters.from_date} onChange={(event) => update("from_date", event.target.value)} /></label>
+      <label>Hasta<input type="date" min={historyFrom} max={historyTo || todayIso()} value={filters.to_date} onChange={(event) => update("to_date", event.target.value)} /></label>
       <Select label="Moneda" value={filters.currency} options={options?.currencies} onChange={(value) => update("currency", value)} />
       <Select label="Producto" value={filters.product_key} options={options?.products} onChange={(value) => update("product_key", value)} />
       <Select label="Vendedor" value={filters.seller_key} options={options?.sellers} onChange={(value) => update("seller_key", value)} />
@@ -381,7 +397,7 @@ function AIAssistant({ filters }: { filters: Filters }) {
   ];
 
   return <>
-    <div className="section-heading"><div><h2>Asistente IA</h2><p className="muted">Analisis de solo lectura sobre el data mart. El asistente no modifica Alegra ni aprueba compras.</p></div><span className="ai-readonly-badge">Solo lectura</span></div>
+    <div className="section-heading"><div><h2>Asistente IA</h2><p className="muted">Analisis de solo lectura sobre el data mart. El asistente no modifica Alegra ni aprueba compras.</p><p className="muted">Contexto de fechas: {filters.from_date} a {filters.to_date}. Usa <strong>Toda la historia</strong> para preguntas históricas.</p></div><span className="ai-readonly-badge">Solo lectura</span></div>
     {aiConfig?.configured === false && <div className="warning">El asistente esta desactivado. Configura {aiConfig.key_name || "la clave del proveedor"} en las variables del servicio API de Railway.</div>}
     {aiConfig?.configured && <p className="muted ai-provider">Proveedor: {aiConfig.provider} · Modelo: {aiConfig.model}</p>}
     <section className="ai-suggestions">{suggestions.map((suggestion) => <button key={suggestion} type="button" disabled={aiConfig?.configured === false} onClick={() => void ask(suggestion)}>{suggestion}</button>)}</section>

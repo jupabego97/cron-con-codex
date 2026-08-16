@@ -42,6 +42,18 @@ def test_tool_filters_inherit_dashboard_context_and_bound_date_range() -> None:
     assert result.product_key == 42
 
 
+def test_tool_filters_allow_full_historical_range() -> None:
+    base = AnalyticsFilters(
+        from_date=date(2022, 11, 9),
+        to_date=date(2026, 8, 16),
+    )
+
+    result = _filters_from_arguments({}, base)
+
+    assert result.from_date == date(2022, 11, 9)
+    assert result.to_date == date(2026, 8, 16)
+
+
 def test_json_safe_preserves_decimal_as_text() -> None:
     value = {"amount": Decimal("123.45"), "date": date.today(), "items": [Decimal("2")]}
 

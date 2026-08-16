@@ -615,8 +615,6 @@ def _filters_from_arguments(
     to_date = optional_date("to_date", base.to_date)
     if from_date > to_date:
         raise ValueError("El rango de fechas no es valido")
-    if (to_date - from_date).days > 730:
-        raise ValueError("El rango maximo de analisis es de 731 dias")
 
     def optional_int(key: str, current: int | None) -> int | None:
         value = arguments.get(key)

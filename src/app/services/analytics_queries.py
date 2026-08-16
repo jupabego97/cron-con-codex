@@ -2,10 +2,11 @@
 """Read-only query service for the tenant-scoped analytics data mart."""
 
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -29,7 +30,7 @@ class AnalyticsFilters:
 
     @classmethod
     def default(cls) -> "AnalyticsFilters":
-        today = date.today()
+        today = datetime.now(ZoneInfo(BUSINESS_TIMEZONE)).date()
         return cls(from_date=today - timedelta(days=29), to_date=today)
 
     def previous_period(self) -> "AnalyticsFilters":
@@ -54,10 +55,24 @@ class AnalyticsQueryService:
         return {
             "date_range": self._one(
                 """
+                WITH used_dates AS (
+                    SELECT date_key FROM fact_sales_line
+                    WHERE tenant_id = :tenant_id AND is_deleted = false
+                    UNION
+                    SELECT date_key FROM fact_purchase_line
+                    WHERE tenant_id = :tenant_id AND is_deleted = false
+                    UNION
+                    SELECT date_key FROM fact_payment
+                    WHERE tenant_id = :tenant_id AND is_deleted = false
+                    UNION
+                    SELECT date_key FROM fact_inventory_movement
+                    WHERE tenant_id = :tenant_id AND is_deleted = false
+                    UNION
+                    SELECT date_key FROM fact_inventory_snapshot
+                    WHERE tenant_id = :tenant_id
+                )
                 SELECT min(d.calendar_date) AS min_date, max(d.calendar_date) AS max_date
-                FROM dim_date d
-                JOIN fact_sales_line f ON f.date_key = d.date_key
-                WHERE f.tenant_id = :tenant_id AND f.is_deleted = false
+                FROM dim_date d JOIN used_dates u ON u.date_key = d.date_key
                 """
             ),
             "currencies": self._rows(

@@ -29,9 +29,18 @@ el formulario de acceso; las rutas de salud y webhooks se mantienen intactas.
 ## Uso y límites de datos
 
 El rango inicial es los últimos 30 días y los filtros se aplican al hecho que
-corresponda. Ventas, compras y pagos se agrupan por moneda: no se suman monedas
-distintas. Los documentos no eliminados se incluyen sin excluir estados; el
-selector de estado permite validar los resultados contra Alegra.
+corresponda. El botón **Toda la historia** toma el mínimo y máximo disponibles
+en ventas, compras, pagos, movimientos y snapshots del tenant; también puede
+usarse antes de una pregunta histórica al asistente IA. Las fechas se calculan
+con el calendario `America/Bogota`, no con UTC del navegador o del servidor.
+Ventas, compras y pagos se agrupan por moneda: no se suman monedas distintas.
+Los documentos no eliminados se incluyen sin excluir estados; el selector de
+estado permite validar los resultados contra Alegra.
+
+El menú **Alertas** representa el estado actual del snapshot y sus ventanas
+operativas propias; no debe interpretarse como una serie histórica. El menú
+**Inventario** combina existencias actuales del último snapshot con movimientos
+del rango seleccionado.
 
 ## Existencias actuales
 

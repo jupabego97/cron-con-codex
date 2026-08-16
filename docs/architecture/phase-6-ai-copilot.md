@@ -19,7 +19,10 @@ La primera version es estrictamente de solo lectura. Las herramientas disponible
 - El stock negativo se trata como excepcion y requiere reconciliacion antes de comprar.
 - Las compras anteriores a 2025 no se usan para reconstruir existencias.
 - Las conversaciones y llamadas a herramientas se auditan en ai_conversations, ai_messages y ai_tool_calls.
-- El rango maximo por herramienta es de 731 dias y las respuestas se limitan para evitar consultas descontroladas.
+- Las herramientas respetan el rango seleccionado en el dashboard, incluida la
+  opción **Toda la historia**. Las respuestas siguen limitadas a agregados y a
+  los principales registros para evitar payloads descontrolados; no se limita
+  artificialmente la cantidad de días del análisis histórico.
 
 ## Despliegue
 
