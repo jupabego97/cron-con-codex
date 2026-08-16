@@ -1,6 +1,26 @@
+from datetime import datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from app.domain.invoices import normalize_invoice
+
+
+def test_naive_alegra_datetime_is_interpreted_as_colombia_local_time() -> None:
+    normalized = normalize_invoice(
+        {"id": "INV-TIME", "datetime": "2026-08-15 10:17:42", "items": []}
+    )
+
+    assert normalized.issued_at == datetime(
+        2026, 8, 15, 10, 17, 42, tzinfo=ZoneInfo("America/Bogota")
+    )
+
+
+def test_timezone_aware_alegra_datetime_keeps_its_declared_timezone() -> None:
+    normalized = normalize_invoice(
+        {"id": "INV-TIME-AWARE", "datetime": "2026-08-15T15:17:42+00:00", "items": []}
+    )
+
+    assert normalized.issued_at == datetime.fromisoformat("2026-08-15T15:17:42+00:00")
 
 
 def test_normalize_invoice_preserves_financial_state_and_line_order() -> None:

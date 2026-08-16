@@ -76,6 +76,21 @@ def test_sales_time_grain_migration_adds_nullable_timestamp_and_local_hour() -> 
     assert '"ix_fact_sales_line_tenant_issued_at"' in migration
 
 
+def test_invoice_local_time_migration_repairs_historical_payloads() -> None:
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / "migrations"
+        / "versions"
+        / "20260816_17_fix_invoice_local_time.py"
+    )
+    migration = migration_path.read_text()
+
+    assert 'revision = "20260816_17"' in migration
+    assert 'down_revision = "20260815_16"' in migration
+    assert "raw_alegra_documents" in migration
+    assert "AT TIME ZONE 'America/Bogota'" in migration
+
+
 def test_sales_hour_query_does_not_create_a_bind_for_clock_separator() -> None:
     service = AnalyticsQueryService.__new__(AnalyticsQueryService)
     captured: dict[str, object] = {}

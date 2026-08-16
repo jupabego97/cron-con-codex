@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
+
+_ALEGRA_LOCAL_TIMEZONE = ZoneInfo("America/Bogota")
 
 
 class InvalidInvoicePayload(ValueError):
@@ -68,7 +71,10 @@ def _as_datetime(value: Any) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=_ALEGRA_LOCAL_TIMEZONE)
+        return parsed
     except ValueError:
         return None
 

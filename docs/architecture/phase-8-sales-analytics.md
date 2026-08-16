@@ -29,6 +29,11 @@ La factura conserva dos niveles de tiempo:
   mart la proyecta en `fact_sales_line.issued_at` y en `sale_hour_local`,
   calculada para `America/Bogota`.
 
+En esta cuenta, Alegra entrega `datetime` sin zona horaria y ese valor representa
+la hora local colombiana. La normalización le asigna `America/Bogota`; los valores
+históricos se corrigen desde `raw_alegra_documents` mediante la migración
+`20260816_17_fix_invoice_local_time`, sin modificar `issue_date` ni los importes.
+
 El reporte de Ventas muestra una serie por hora local únicamente con documentos
 que tienen hora disponible. La serie comercial usa las franjas `10:00` a `19:00`;
 `20:00` es el límite exclusivo de cierre y no se incluye como hora operativa.
