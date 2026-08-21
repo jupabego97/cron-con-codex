@@ -700,6 +700,128 @@ class AnalyticsQueryService:
             **self._inventory_kpis(filters),
         }
 
+    def sales_by_weekday_hour(self, filters: AnalyticsFilters) -> dict[str, Any]:
+        """Return the compact time-of-week view used by the AI specialist."""
+        return {
+            "by_weekday": self._sales_by_weekday(filters),
+            "by_weekday_hour": self._sales_by_weekday_hour(filters),
+            "time_coverage": self._sales_time_coverage(filters),
+        }
+
+    def margin_diagnostics(self, filters: AnalyticsFilters) -> dict[str, Any]:
+        """Compare margin drivers against the equivalent previous period."""
+        previous = filters.previous_period()
+        family_joins = "LEFT JOIN dim_product p ON p.key = f.product_key"
+        family_dimension = "COALESCE(p.family_name, 'SIN FAMILIA') AS family"
+        product_dimension = (
+            "COALESCE(p.name, 'Sin producto') AS product, "
+            "p.reference, COALESCE(p.family_name, 'SIN FAMILIA') AS family"
+        )
+        current_metrics = self._sales_metrics(filters)
+        previous_metrics = self._sales_metrics(previous)
+        current_families = self._sales_detail(
+            filters,
+            joins=family_joins,
+            dimension_select=family_dimension,
+            group_by="COALESCE(p.family_name, 'SIN FAMILIA')",
+        )
+        previous_families = self._sales_detail(
+            previous,
+            joins=family_joins,
+            dimension_select=family_dimension,
+            group_by="COALESCE(p.family_name, 'SIN FAMILIA')",
+        )
+        current_products = self._sales_detail(
+            filters,
+            joins=family_joins,
+            dimension_select=product_dimension,
+            group_by="p.name, p.reference, COALESCE(p.family_name, 'SIN FAMILIA')",
+        )
+        previous_products = self._sales_detail(
+            previous,
+            joins=family_joins,
+            dimension_select=product_dimension,
+            group_by="p.name, p.reference, COALESCE(p.family_name, 'SIN FAMILIA')",
+        )
+        return {
+            "current": current_metrics,
+            "previous": previous_metrics,
+            "current_period": _filter_period_summary(filters),
+            "previous_period": _filter_period_summary(previous),
+            "families": {
+                "current": current_families,
+                "previous": previous_families,
+            },
+            "products": {
+                "current": current_products,
+                "previous": previous_products,
+            },
+        }
+
+    def data_quality(self, filters: AnalyticsFilters) -> dict[str, Any]:
+        """Expose data limitations before the AI makes a business conclusion."""
+        sales_where, sales_params = self._fact_where(
+            filters, alias="f", allow_seller=True, allow_status=True
+        )
+        purchase_where, purchase_params = self._fact_where(
+            filters,
+            alias="f",
+            allow_seller=False,
+            allow_status=True,
+            allow_provider=True,
+        )
+        sales = self._one(
+            f"""
+            SELECT count(*) AS lines,
+                   count(*) FILTER (WHERE f.product_key IS NULL) AS lines_without_product,
+                   count(*) FILTER (WHERE f.contact_key IS NULL) AS lines_without_customer,
+                   count(*) FILTER (WHERE f.issued_at IS NULL) AS lines_without_time,
+                   count(*) FILTER (WHERE f.sale_hour_local < {BUSINESS_OPEN_HOUR}
+                                      OR f.sale_hour_local >= {BUSINESS_CLOSE_HOUR}) AS lines_outside_hours,
+                   count(*) FILTER (WHERE f.cost_status = 'unavailable') AS lines_without_cost,
+                   count(*) FILTER (WHERE f.cost_status = 'partial') AS lines_partial_cost,
+                   count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents
+            FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
+            WHERE {sales_where}
+            """,
+            sales_params,
+        ) or {}
+        purchases = self._one(
+            f"""
+            SELECT count(*) AS lines,
+                   count(*) FILTER (WHERE f.product_key IS NULL) AS lines_without_product,
+                   count(*) FILTER (WHERE f.provider_key IS NULL) AS lines_without_supplier,
+                   count(DISTINCT f.document_alegra_id) AS documents
+            FROM fact_purchase_line f JOIN dim_date d ON d.date_key = f.date_key
+            WHERE {purchase_where}
+            """,
+            purchase_params,
+        ) or {}
+        snapshot = self._one(
+            """
+            WITH latest AS (
+                SELECT id FROM inventory_snapshot_runs
+                WHERE tenant_id = :tenant_id AND status = 'succeeded'
+                ORDER BY finished_at DESC LIMIT 1
+            )
+            SELECT count(*) AS rows,
+                   count(*) FILTER (WHERE f.product_key IS NULL) AS rows_without_product,
+                   count(*) FILTER (WHERE f.quantity_on_hand < 0) AS negative_rows,
+                   count(*) FILTER (WHERE f.quantity_on_hand <= 0) AS unavailable_rows,
+                   max(f.captured_at) AS snapshot_at
+            FROM fact_inventory_snapshot f
+            JOIN latest ON latest.id = f.snapshot_run_id
+            WHERE f.tenant_id = :tenant_id
+            """
+        ) or {}
+        return {
+            "filters": _filter_period_summary(filters),
+            "sales": sales,
+            "purchases": purchases,
+            "inventory_snapshot": snapshot,
+            "mart": self.refresh_status(),
+        }
+
     def purchase_recommendations(
         self,
         filters: AnalyticsFilters,
@@ -2500,3 +2622,12 @@ class AnalyticsQueryService:
     def _one(self, statement: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
         rows = self._rows(statement, params)
         return rows[0] if rows else None
+
+
+def _filter_period_summary(filters: AnalyticsFilters) -> dict[str, Any]:
+    return {
+        "from_date": filters.from_date,
+        "to_date": filters.to_date,
+        "days": (filters.to_date - filters.from_date).days + 1,
+        "currency": filters.currency,
+    }

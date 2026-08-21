@@ -341,7 +341,7 @@ function StockPriorityTable({ title, rows, coverage = false }: { title: string; 
 }
 
 type AIChatMessage = { role: "user" | "assistant"; content: string };
-type AIChatResponse = { conversation_id: string; answer: string; model: string; tools_used?: Array<{ tool?: string; duration_ms?: number }> };
+type AIChatResponse = { conversation_id: string; answer: string; model: string; tools_used?: Array<{ tool?: string; duration_ms?: number }>; analysis_plan?: { intent?: string } };
 
 function AIAssistant({ filters }: { filters: Filters }) {
   const [messages, setMessages] = useState<AIChatMessage[]>([
@@ -387,7 +387,9 @@ function AIAssistant({ filters }: { filters: Filters }) {
       });
       setConversationId(response.conversation_id);
       const tools = response.tools_used?.map((item) => String(item.tool || "")).filter(Boolean).join(", ");
-      setMessages((current) => [...current, { role: "assistant", content: response.answer + (tools ? `\n\nFuentes consultadas: ${tools}.` : "") }]);
+      const route = response.analysis_plan?.intent;
+      const metadata = [route ? `Ruta analítica: ${route}.` : "", tools ? `Fuentes consultadas: ${tools}.` : ""].filter(Boolean).join("\n");
+      setMessages((current) => [...current, { role: "assistant", content: response.answer + (metadata ? `\n\n${metadata}` : "") }]);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No fue posible consultar el asistente.");
     } finally {

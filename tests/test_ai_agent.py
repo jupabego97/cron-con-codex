@@ -2,7 +2,13 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from app.services.ai_agent import TOOLS, RetailAIAgent, _filters_from_arguments, _json_safe
+from app.services.ai_agent import (
+    TOOLS,
+    RetailAIAgent,
+    _analysis_plan,
+    _filters_from_arguments,
+    _json_safe,
+)
 from app.services.analytics_queries import AnalyticsFilters
 
 
@@ -13,11 +19,14 @@ def test_ai_tools_are_read_only_functions() -> None:
         "get_inventory_analysis",
         "get_replenishment_plan",
         "get_sales_analysis",
+        "get_sales_by_weekday_hour",
+        "get_margin_diagnostics",
         "get_purchase_supplier_analysis",
         "get_payments_analysis",
         "get_customer_analysis",
         "get_business_kpis",
         "get_data_status",
+        "get_data_quality",
     }
     assert all(tool["type"] == "function" for tool in TOOLS)
 
@@ -52,6 +61,21 @@ def test_tool_filters_allow_full_historical_range() -> None:
 
     assert result.from_date == date(2022, 11, 9)
     assert result.to_date == date(2026, 8, 16)
+
+
+def test_analysis_plan_routes_deep_questions_to_specialized_tools() -> None:
+    plan = _analysis_plan("¿Qué pasó el domingo por hora?")
+
+    assert plan["intent"] == "ventas_por_dia_y_hora"
+    assert "get_sales_by_weekday_hour" in plan["recommended_tools"]
+
+    margin_plan = _analysis_plan("¿Por qué bajó la utilidad este mes?")
+    assert margin_plan["intent"] == "diagnostico_de_margen"
+    assert "get_margin_diagnostics" in margin_plan["recommended_tools"]
+
+    combined_plan = _analysis_plan("¿Por qué bajó el margen el domingo?")
+    assert "ventas_por_dia_y_hora" in combined_plan["intent"]
+    assert "diagnostico_de_margen" in combined_plan["intent"]
 
 
 def test_json_safe_preserves_decimal_as_text() -> None:
@@ -101,6 +125,33 @@ class _SalesAnalytics(_Analytics):
                 {"weekday": "domingo", "period": "10:00", "currency_code": "COP"}
             ],
             "time_coverage": [{"currency_code": "COP", "documents_with_time": 1}],
+        }
+
+
+class _DeepAnalytics(_Analytics):
+    def sales_by_weekday_hour(self, _filters):
+        return {
+            "by_weekday": [{"weekday": "domingo", "amount": "1000"}],
+            "by_weekday_hour": [{"weekday": "domingo", "period": "18:00", "amount": "1000"}],
+            "time_coverage": [],
+        }
+
+    def margin_diagnostics(self, _filters):
+        return {
+            "current": [{"currency_code": "COP", "net_sales": "1000"}],
+            "previous": [{"currency_code": "COP", "net_sales": "800"}],
+            "current_period": {},
+            "previous_period": {},
+            "families": {"current": [], "previous": []},
+            "products": {"current": [], "previous": []},
+        }
+
+    def data_quality(self, _filters):
+        return {
+            "sales": {"lines": 1},
+            "purchases": {"lines": 1},
+            "inventory_snapshot": {"negative_rows": 0},
+            "mart": {"is_stale": False},
         }
 
 
@@ -157,6 +208,55 @@ def test_agent_executes_tools_before_returning_answer() -> None:
     assert session.commits == 1
 
 
+class _DuplicateCall:
+    type = "function_call"
+    name = "get_data_status"
+    arguments = "{}"
+
+    def __init__(self, call_id: str):
+        self.call_id = call_id
+
+
+class _DuplicateResponses:
+    def __init__(self):
+        self.calls = 0
+
+    def create(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return _Response([_DuplicateCall("call_1")])
+        if self.calls == 2:
+            return _Response([_DuplicateCall("call_2")])
+        return _Response([], "Respondió usando el resultado ya consultado.")
+
+
+class _DuplicateClient:
+    def __init__(self):
+        self.responses = _DuplicateResponses()
+
+
+def test_repeated_identical_tool_call_is_cached_and_forces_final_response() -> None:
+    session = _Session()
+    agent = RetailAIAgent(
+        session=session,
+        tenant_id=UUID("23332716-6b46-41d4-bc9b-03613fbab6df"),
+        analytics=_Analytics(),
+        api_key="test-key",
+        model="test-model",
+    )
+    client = _DuplicateClient()
+    agent._client = lambda: client
+
+    result = agent.ask(
+        message="¿Está actualizado el mart?",
+        base_filters=AnalyticsFilters.default(),
+    )
+
+    assert result["answer"] == "Respondió usando el resultado ya consultado."
+    assert len(result["tools_used"]) == 1
+    assert client.responses.calls == 3
+
+
 def test_sales_tool_exposes_business_hours_to_the_agent() -> None:
     agent = RetailAIAgent(
         session=_Session(),
@@ -182,6 +282,28 @@ def test_sales_tool_exposes_business_hours_to_the_agent() -> None:
         "closes_at": "20:00",
         "included_hour_buckets": "10:00-19:00",
     }
+
+
+def test_specialized_tools_filter_weekday_and_return_margin_changes() -> None:
+    agent = RetailAIAgent(
+        session=_Session(),
+        tenant_id=UUID("23332716-6b46-41d4-bc9b-03613fbab6df"),
+        analytics=_DeepAnalytics(),
+        api_key="test-key",
+        model="test-model",
+    )
+    filters = AnalyticsFilters(from_date=date(2026, 8, 1), to_date=date(2026, 8, 15))
+
+    hourly = agent._dispatch_tool(
+        "get_sales_by_weekday_hour", {"weekday": "DOMINGO"}, filters
+    )
+    margin = agent._dispatch_tool("get_margin_diagnostics", {}, filters)
+    quality = agent._dispatch_tool("get_data_quality", {}, filters)
+
+    assert hourly["weekday_requested"] == "domingo"
+    assert hourly["by_weekday_hour"][0]["period"] == "18:00"
+    assert margin["change"][0]["net_sales"]["delta"] == Decimal("200")
+    assert quality["warnings"] == []
 
 
 class _GeminiCall:

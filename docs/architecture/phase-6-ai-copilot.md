@@ -8,7 +8,26 @@ Dashboard React -> /api/v1/ai/chat -> RetailAIAgent -> herramientas tipadas
                                                     -> AnalyticsQueryService
                                                     -> data mart tenant-scoped
 
-La primera version es estrictamente de solo lectura. Las herramientas disponibles cubren inventario, reposicion, ventas, compras/proveedores, pagos, clientes, KPIs y estado de datos. El modelo no recibe SQL libre y no puede modificar Alegra, el inventario ni las politicas de compra.
+La primera version es estrictamente de solo lectura. Las herramientas disponibles cubren inventario, reposicion, ventas, ventas por dia y hora, diagnostico de margen, compras/proveedores, pagos, clientes, KPIs, calidad y estado de datos. El modelo no recibe SQL libre y no puede modificar Alegra, el inventario ni las politicas de compra.
+
+## Agente analitico profundo
+
+El agente usa un enrutador deterministico antes de llamar al modelo. El enrutador
+identifica intenciones como `ventas_por_dia_y_hora`, `diagnostico_de_margen`,
+`reposicion_y_proveedores` o `salud_de_inventario` y entrega una ruta sugerida.
+El modelo puede ajustarla, pero no debe repetir una herramienta con los mismos
+argumentos.
+
+Las herramientas especializadas son deliberadamente pequenas:
+
+- `get_sales_by_weekday_hour`: compara los siete dias y las franjas 10:00-19:00.
+- `get_margin_diagnostics`: compara el periodo actual contra el equivalente anterior y descompone por familia y producto.
+- `get_data_quality`: informa faltantes de producto, hora, costo, proveedor, stock negativo y frescura del mart.
+
+Los calculos permanecen en `AnalyticsQueryService`; el modelo interpreta y
+explica. Cada respuesta incluye la ruta analitica y las herramientas consultadas.
+Si el modelo intenta repetir una consulta identica, el resultado se reutiliza y
+la siguiente ronda se fuerza a respuesta sin herramientas para evitar ciclos.
 
 ## Calidad y seguridad
 
@@ -19,6 +38,7 @@ La primera version es estrictamente de solo lectura. Las herramientas disponible
 - El stock negativo se trata como excepcion y requiere reconciliacion antes de comprar.
 - Las compras anteriores a 2025 no se usan para reconstruir existencias.
 - Las conversaciones y llamadas a herramientas se auditan en ai_conversations, ai_messages y ai_tool_calls.
+- El agente conserva la evidencia por tenant y rango de fechas; no expone payloads crudos de Alegra ni SQL al navegador.
 - Las herramientas respetan el rango seleccionado en el dashboard, incluida la
   opción **Toda la historia**. Las respuestas siguen limitadas a agregados y a
   los principales registros para evitar payloads descontrolados; no se limita
