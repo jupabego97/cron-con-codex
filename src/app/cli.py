@@ -5,6 +5,7 @@ from contextlib import suppress
 from datetime import date
 from urllib.parse import urlencode
 
+import httpx
 from alembic import command
 from alembic.config import Config
 
@@ -171,7 +172,20 @@ async def sync_invoices(*, tenant_id: uuid.UUID, mode: str, lookback_days: int) 
                 run = await InvoiceReconciliationService(
                     session=session, alegra=alegra
                 ).reconcile_recent(tenant_id=tenant_id, lookback_days=lookback_days)
+                procurement_runs = await ProcurementReconciliationService(
+                    session=session, alegra=alegra
+                ).run(
+                    tenant_id=tenant_id,
+                    lookback_days=lookback_days,
+                )
     print(f"{run.id} {run.status} read={run.records_read} created={run.records_written}")
+    if mode == "reconcile":
+        for procurement_run in procurement_runs:
+            print(
+                f"{procurement_run.resource} {procurement_run.status} "
+                f"read={procurement_run.records_read} "
+                f"written={procurement_run.records_written}"
+            )
 
 
 async def process_webhooks(*, poll_seconds: float) -> None:
@@ -242,6 +256,12 @@ async def configure_webhooks(*, tenant_slug: str, base_url: str) -> None:
         raise ValueError("base_url must start with https://")
     query = urlencode({"token": settings.alegra_webhook_secret.get_secret_value()})
     target = f"{root}/webhooks/alegra/{tenant_slug}?{query}"
+    async with httpx.AsyncClient(timeout=10) as callback_client:
+        callback_response = await callback_client.post(target, content=b"")
+    if not 200 <= callback_response.status_code < 300:
+        raise RuntimeError(
+            f"Webhook callback validation failed with HTTP {callback_response.status_code}"
+        )
     required = (
         "new-invoice",
         "edit-invoice",
@@ -262,21 +282,24 @@ async def configure_webhooks(*, tenant_slug: str, base_url: str) -> None:
         existing = await alegra.list_webhook_subscriptions()
         for event in required:
             subscriptions = [row for row in existing if str(row.get("event")) == event]
-            exact = next(
-                (
-                    row
-                    for row in subscriptions
-                    if str(row.get("url", "")).rstrip("/") == target.rstrip("/")
-                ),
-                None,
-            )
+            exact_rows = [
+                row
+                for row in subscriptions
+                if str(row.get("url", "")).rstrip("/") == target.rstrip("/")
+            ]
+            managed_path = f"/webhooks/alegra/{tenant_slug}"
+            stale_rows = [
+                row
+                for row in subscriptions
+                if managed_path in str(row.get("url", "")) and row not in exact_rows
+            ]
+            for stale in stale_rows:
+                if stale.get("id") is not None:
+                    await alegra.delete_webhook_subscription(str(stale["id"]))
+                    print(f"{event} removed-stale")
+            exact = exact_rows[0] if exact_rows else None
             if exact is not None:
                 print(f"{event} already-configured")
-                continue
-            editable = next((row for row in subscriptions if row.get("id") is not None), None)
-            if editable is not None:
-                await alegra.update_webhook_subscription(str(editable["id"]), url=target)
-                print(f"{event} updated")
                 continue
             await alegra.create_webhook_subscription(event=event, url=target)
             print(f"{event} created")
@@ -392,20 +415,10 @@ def repair_purchase_lines(*, tenant_id: uuid.UUID, write_batch_size: int) -> Non
 
 
 async def snapshot_inventory(*, tenant_id: uuid.UUID, warehouse_concurrency: int) -> None:
-    settings = get_settings()
-    if settings.alegra_api_basic_token is None:
-        raise RuntimeError("ALEGRA_API_BASIC_TOKEN is required for snapshot-inventory")
-    with get_session_factory()() as session:
-        async with AlegraClient(
-            basic_token=settings.alegra_api_basic_token.get_secret_value(),
-            requests_per_minute=110,
-        ) as alegra:
-            result = await InventorySnapshotService(session=session, alegra=alegra).capture(
-                tenant_id=tenant_id, warehouse_concurrency=warehouse_concurrency
-            )
-    print(
-        f"{result.run_id} {result.status} read={result.records_read} "
-        f"written={result.records_written}"
+    """Backward-compatible command that leaves the new snapshot immediately queryable."""
+    await refresh_inventory_analytics(
+        tenant_id=tenant_id,
+        warehouse_concurrency=warehouse_concurrency,
     )
 
 

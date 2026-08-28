@@ -202,6 +202,12 @@ class AlegraClient:
             raise AlegraPermanentError("Alegra returned an unexpected webhook response")
         return result
 
+    async def delete_webhook_subscription(self, subscription_id: str) -> None:
+        await self._request_json(
+            "DELETE",
+            f"/webhooks/subscriptions/{quote(subscription_id, safe='')}",
+        )
+
     async def iter_all_resource(
         self,
         resource: AlegraResource,
@@ -354,6 +360,8 @@ class AlegraClient:
                 continue
             if response.is_error:
                 raise AlegraPermanentError(f"Alegra returned HTTP {response.status_code}")
+            if response.status_code == 204 or not response.content:
+                return {}
             try:
                 return response.json()
             except ValueError as error:

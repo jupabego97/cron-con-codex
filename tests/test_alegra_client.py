@@ -82,3 +82,27 @@ def test_webhook_subscription_can_be_updated() -> None:
     assert received["method"] == "PUT"
     assert received["path"].endswith("/webhooks/subscriptions/subscription-id")
     assert '"url":"https://example.test/webhook?token=secret"' in received["body"]
+
+
+def test_webhook_subscription_can_be_deleted_with_empty_response() -> None:
+    received: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received["method"] = request.method
+        received["path"] = request.url.path
+        return httpx.Response(204)
+
+    async def delete() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            base_url="https://api.alegra.com/api/v1", transport=transport
+        ) as http:
+            alegra = AlegraClient(basic_token="test-token", client=http)
+            await alegra.delete_webhook_subscription("subscription-id")
+
+    asyncio.run(delete())
+
+    assert received == {
+        "method": "DELETE",
+        "path": "/api/v1/webhooks/subscriptions/subscription-id",
+    }
