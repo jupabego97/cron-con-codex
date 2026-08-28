@@ -3,6 +3,7 @@ import asyncio
 import uuid
 from contextlib import suppress
 from datetime import date
+from urllib.parse import urlencode
 
 from alembic import command
 from alembic.config import Config
@@ -239,10 +240,8 @@ async def configure_webhooks(*, tenant_slug: str, base_url: str) -> None:
     root = base_url.strip().rstrip("/")
     if not root.startswith("https://"):
         raise ValueError("base_url must start with https://")
-    target = (
-        f"{root}/webhooks/alegra/{tenant_slug}?token="
-        f"{settings.alegra_webhook_secret.get_secret_value()}"
-    )
+    query = urlencode({"token": settings.alegra_webhook_secret.get_secret_value()})
+    target = f"{root}/webhooks/alegra/{tenant_slug}?{query}"
     required = (
         "new-invoice",
         "edit-invoice",
