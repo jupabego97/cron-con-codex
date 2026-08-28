@@ -271,6 +271,25 @@ class PurchaseBill(SourceProjectionMixin, Base):
     total: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     total_paid: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     balance: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    purchase_order_alegra_id: Mapped[str | None] = mapped_column(String(100), index=True)
+
+
+class PurchaseOrder(SourceProjectionMixin, Base):
+    __tablename__ = "purchase_orders"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "alegra_id", name="uq_purchase_order_tenant_alegra"),
+    )
+
+    order_date: Mapped[date | None] = mapped_column(Date)
+    delivery_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str | None] = mapped_column(String(30))
+    document_number: Mapped[str | None] = mapped_column(String(100))
+    provider_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    provider_name: Mapped[str | None] = mapped_column(String(300))
+    warehouse_alegra_id: Mapped[str | None] = mapped_column(String(100))
+    currency_code: Mapped[str | None] = mapped_column(String(10))
+    total: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    observations: Mapped[str | None] = mapped_column(Text)
 
 
 class Payment(SourceProjectionMixin, Base):
@@ -346,6 +365,15 @@ class PurchaseBillLine(DocumentLineMixin, Base):
     __table_args__ = (
         UniqueConstraint(
             "tenant_id", "document_alegra_id", "line_number", name="uq_purchase_bill_line"
+        ),
+    )
+
+
+class PurchaseOrderLine(DocumentLineMixin, Base):
+    __tablename__ = "purchase_order_lines"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "document_alegra_id", "line_number", name="uq_purchase_order_line"
         ),
     )
 

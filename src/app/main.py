@@ -11,6 +11,7 @@ from app.api.ai import router as ai_router
 from app.api.analytics import router as analytics_router
 from app.api.dashboard import router as dashboard_router
 from app.api.health import router as health_router
+from app.api.procurement import router as procurement_router
 from app.api.webhooks import router as webhook_router
 from app.core.config import get_settings
 
@@ -55,6 +56,7 @@ def create_app() -> FastAPI:
     app.include_router(webhook_router)
     app.include_router(dashboard_router)
     app.include_router(analytics_router)
+    app.include_router(procurement_router)
     app.include_router(ai_router)
     _mount_dashboard(app)
     return app

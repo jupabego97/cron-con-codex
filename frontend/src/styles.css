@@ -11,3 +11,15 @@
  .data-warning { color: #ffb4a2; font-weight: 800; } .confidence-low { color: #ffb4a2; } .confidence-medium { color: #ffe08a; } .confidence-high { color: #78f3d3; } .ai-readonly-badge { color: #78f3d3; border: 1px solid #287866; background: #123f38; border-radius: 999px; padding: 8px 12px; font-size: .78rem; font-weight: 800; } .ai-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; } .ai-suggestions button { width: auto; color: #c7d4ea; background: #17243b; border: 1px solid #344566; text-align: left; } .ai-chat-card { background: #101a2d; border: 1px solid #344566; border-radius: 14px; padding: 18px; max-width: 1000px; } .ai-messages { display: grid; gap: 12px; max-height: 560px; overflow-y: auto; margin-bottom: 18px; } .ai-message { max-width: 86%; padding: 12px 14px; border-radius: 12px; } .ai-message p { white-space: pre-wrap; line-height: 1.55; margin: 5px 0 0; } .ai-message small { color: #78f3d3; font-weight: 800; } .ai-message.assistant { background: #17243b; border: 1px solid #30415f; } .ai-message.user { background: #123f38; border: 1px solid #287866; justify-self: end; } .ai-message.user small { color: #d9fff5; } .ai-composer { display: grid; grid-template-columns: 1fr 130px; gap: 10px; align-items: end; } .ai-composer textarea { width: 100%; resize: vertical; min-height: 80px; } .ai-composer .primary-button { width: 130px; }
 @media (max-width: 700px) { .ai-composer { grid-template-columns: 1fr; } .ai-composer .primary-button { width: 100%; } .ai-message { max-width: 100%; } }
 .ai-provider { margin-top: -0.5rem; }
+.purchase-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.action-button { border: 1px solid #4a608b; background: #17243b; }
+.action-button:disabled { cursor: not-allowed; opacity: .45; }
+.danger-action { color: #ffd0d8; border-color: #8c3448; }
+.quality-warning { display: block; margin-top: 5px; font-weight: 500; }
+.classification-badge { display: inline-flex; min-width: 38px; justify-content: center; padding: 5px 7px; border-radius: 999px; background: #243b66; color: #dce8ff; font-weight: 900; }
+.wide-table { min-width: 1500px; }
+.decision-buy_weekly, .decision-ready_for_approval { color: #78f3d3; }
+.decision-deferred_budget, .decision-accumulate_minimum { color: #ffe08a; }
+.decision-reconcile, .decision-blocked_data { color: #ffb4a2; }
+.decision-no_reorder { color: #9fb3d5; }
+@media (max-width: 700px) { .purchase-actions { width: 100%; justify-content: stretch; } .purchase-actions button { flex: 1; } }

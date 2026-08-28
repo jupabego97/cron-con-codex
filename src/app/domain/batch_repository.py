@@ -27,6 +27,8 @@ from app.db.models import (
     Payment,
     PurchaseBill,
     PurchaseBillLine,
+    PurchaseOrder,
+    PurchaseOrderLine,
     RawAlegraDocument,
     SalesInvoice,
     SalesInvoiceLine,
@@ -50,6 +52,7 @@ ProjectionModel = (
     | type[Warehouse]
     | type[Seller]
     | type[PurchaseBill]
+    | type[PurchaseOrder]
     | type[Payment]
     | type[CreditNote]
     | type[InventoryAdjustment]
@@ -57,6 +60,7 @@ ProjectionModel = (
 )
 LineModel = (
     type[PurchaseBillLine]
+    | type[PurchaseOrderLine]
     | type[CreditNoteLine]
     | type[InventoryAdjustmentLine]
     | type[WarehouseTransferLine]
@@ -69,6 +73,7 @@ _PROJECTIONS: dict[str, tuple[ProjectionModel, str]] = {
     "warehouse": (Warehouse, "uq_warehouse_tenant_alegra"),
     "seller": (Seller, "uq_seller_tenant_alegra"),
     "bill": (PurchaseBill, "uq_purchase_bill_tenant_alegra"),
+    "purchase_order": (PurchaseOrder, "uq_purchase_order_tenant_alegra"),
     "payment": (Payment, "uq_payment_tenant_alegra"),
     "credit_note": (CreditNote, "uq_credit_note_tenant_alegra"),
     "inventory_adjustment": (InventoryAdjustment, "uq_inventory_adjustment_tenant_alegra"),
@@ -76,6 +81,7 @@ _PROJECTIONS: dict[str, tuple[ProjectionModel, str]] = {
 }
 _LINE_PROJECTIONS: dict[str, tuple[LineModel, str]] = {
     "bill": (PurchaseBillLine, "uq_purchase_bill_line"),
+    "purchase_order": (PurchaseOrderLine, "uq_purchase_order_line"),
     "credit_note": (CreditNoteLine, "uq_credit_note_line"),
     "inventory_adjustment": (InventoryAdjustmentLine, "uq_inventory_adjustment_line"),
     "warehouse_transfer": (WarehouseTransferLine, "uq_warehouse_transfer_line"),
@@ -478,6 +484,23 @@ def _projection_fields(resource: str, payload: dict[str, Any], external_id: str)
             "total": _decimal(payload.get("total")),
             "total_paid": _decimal(payload.get("totalPaid")),
             "balance": _decimal(payload.get("balance")),
+            "purchase_order_alegra_id": _object_id(
+                payload.get("purchaseOrder") or payload.get("purchaseOrder_id")
+            ),
+        }
+    if resource == "purchase_order":
+        provider = payload.get("provider") or payload.get("supplier") or payload.get("client")
+        return {
+            "order_date": _date(payload.get("date")),
+            "delivery_date": _date(payload.get("deliveryDate")),
+            "status": _text(payload.get("status")),
+            "document_number": _document_number(payload),
+            "provider_alegra_id": _object_id(provider),
+            "provider_name": _object_name(provider),
+            "warehouse_alegra_id": _object_id(payload.get("warehouse")),
+            "currency_code": _currency_code(payload.get("currency")),
+            "total": _decimal(payload.get("total")),
+            "observations": _text(payload.get("observations")),
         }
     if resource == "payment":
         return {

@@ -18,6 +18,7 @@ from app.services.inventory_cost_opening import InventoryCostOpeningService
 from app.services.inventory_snapshot import InventorySnapshotService
 from app.services.invoice_reconciliation import InvoiceReconciliationService
 from app.services.invoice_sync import InvoiceSyncService
+from app.services.procurement_sync import ProcurementReconciliationService
 from app.services.resource_sync import BackfillProgress, HistoricalBackfillService
 from app.services.sales_cost_allocation import HistoricalSalesCostService
 from app.services.webhook_worker import WebhookWorker
@@ -52,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help=(
             "all or comma-separated keys: contact,item,warehouse,seller,invoice,bill,payment,"
-            "credit_note,inventory_adjustment,warehouse_transfer"
+            "purchase_order,credit_note,inventory_adjustment,warehouse_transfer"
         ),
     )
     backfill.add_argument("--resource-concurrency", type=int, default=4)
@@ -111,6 +112,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     repair_purchases.add_argument("tenant_id", type=uuid.UUID)
     repair_purchases.add_argument("--write-batch-size", type=int, default=200)
+
+    procurement = subparsers.add_parser(
+        "reconcile-procurement",
+        help="Refresh recent supplier bills and open purchase orders",
+    )
+    procurement.add_argument("tenant_id", type=uuid.UUID)
+    procurement.add_argument("--lookback-days", type=int, default=45)
+    procurement.add_argument("--write-batch-size", type=int, default=100)
+
+    inventory_analytics = subparsers.add_parser(
+        "refresh-inventory-analytics",
+        help="Capture inventory and immediately rebuild the analytical mart",
+    )
+    inventory_analytics.add_argument("tenant_id", type=uuid.UUID)
+    inventory_analytics.add_argument("--warehouse-concurrency", type=int, default=3)
+
+    webhooks = subparsers.add_parser(
+        "configure-webhooks",
+        help="Idempotently create the required Alegra webhook subscriptions",
+    )
+    webhooks.add_argument("tenant_slug")
+    webhooks.add_argument("base_url")
     return parser
 
 
@@ -165,6 +188,99 @@ async def process_webhooks(*, poll_seconds: float) -> None:
                 processed = await worker.run_once()
                 if not processed:
                     await asyncio.sleep(poll_seconds)
+
+
+async def reconcile_procurement(
+    *, tenant_id: uuid.UUID, lookback_days: int, write_batch_size: int
+) -> None:
+    settings = get_settings()
+    if settings.alegra_api_basic_token is None:
+        raise RuntimeError("ALEGRA_API_BASIC_TOKEN is required for procurement reconciliation")
+    with get_session_factory()() as session:
+        async with AlegraClient(
+            basic_token=settings.alegra_api_basic_token.get_secret_value()
+        ) as alegra:
+            runs = await ProcurementReconciliationService(session=session, alegra=alegra).run(
+                tenant_id=tenant_id,
+                lookback_days=lookback_days,
+                write_batch_size=write_batch_size,
+            )
+    for run in runs:
+        print(f"{run.resource} {run.status} read={run.records_read} written={run.records_written}")
+
+
+async def refresh_inventory_analytics(*, tenant_id: uuid.UUID, warehouse_concurrency: int) -> None:
+    settings = get_settings()
+    if settings.alegra_api_basic_token is None:
+        raise RuntimeError("ALEGRA_API_BASIC_TOKEN is required for inventory refresh")
+    with get_session_factory()() as session:
+        async with AlegraClient(
+            basic_token=settings.alegra_api_basic_token.get_secret_value()
+        ) as alegra:
+            snapshot = await InventorySnapshotService(session=session, alegra=alegra).capture(
+                tenant_id=tenant_id,
+                warehouse_concurrency=warehouse_concurrency,
+            )
+        mart = AnalyticsMartService(
+            session=session,
+            default_currency_code=settings.analytics_default_currency_code,
+        ).refresh(tenant_id=tenant_id)
+        costs = HistoricalSalesCostService(session=session).allocate(tenant_id=tenant_id)
+    print(
+        f"snapshot={snapshot.run_id} {snapshot.status} rows={snapshot.records_written} "
+        f"mart={mart.run_id} {mart.status} cost={costs.lines_costed}/{costs.lines_read}"
+    )
+
+
+async def configure_webhooks(*, tenant_slug: str, base_url: str) -> None:
+    settings = get_settings()
+    if settings.alegra_api_basic_token is None or settings.alegra_webhook_secret is None:
+        raise RuntimeError("ALEGRA_API_BASIC_TOKEN and ALEGRA_WEBHOOK_SECRET are required")
+    root = base_url.strip().rstrip("/")
+    if not root.startswith("https://"):
+        raise ValueError("base_url must start with https://")
+    target = (
+        f"{root}/webhooks/alegra/{tenant_slug}?token="
+        f"{settings.alegra_webhook_secret.get_secret_value()}"
+    )
+    required = (
+        "new-invoice",
+        "edit-invoice",
+        "delete-invoice",
+        "new-bill",
+        "edit-bill",
+        "delete-bill",
+        "new-client",
+        "edit-client",
+        "delete-client",
+        "new-item",
+        "edit-item",
+        "delete-item",
+    )
+    async with AlegraClient(
+        basic_token=settings.alegra_api_basic_token.get_secret_value()
+    ) as alegra:
+        existing = await alegra.list_webhook_subscriptions()
+        for event in required:
+            subscriptions = [row for row in existing if str(row.get("event")) == event]
+            exact = next(
+                (
+                    row
+                    for row in subscriptions
+                    if str(row.get("url", "")).rstrip("/") == target.rstrip("/")
+                ),
+                None,
+            )
+            if exact is not None:
+                print(f"{event} already-configured")
+                continue
+            editable = next((row for row in subscriptions if row.get("id") is not None), None)
+            if editable is not None:
+                await alegra.update_webhook_subscription(str(editable["id"]), url=target)
+                print(f"{event} updated")
+                continue
+            await alegra.create_webhook_subscription(event=event, url=target)
+            print(f"{event} created")
 
 
 async def backfill_all(
@@ -276,9 +392,7 @@ def repair_purchase_lines(*, tenant_id: uuid.UUID, write_batch_size: int) -> Non
     print(f"documents={documents} lines={lines}")
 
 
-async def snapshot_inventory(
-    *, tenant_id: uuid.UUID, warehouse_concurrency: int
-) -> None:
+async def snapshot_inventory(*, tenant_id: uuid.UUID, warehouse_concurrency: int) -> None:
     settings = get_settings()
     if settings.alegra_api_basic_token is None:
         raise RuntimeError("ALEGRA_API_BASIC_TOKEN is required for snapshot-inventory")
@@ -342,6 +456,28 @@ def main() -> None:
             snapshot_inventory(
                 tenant_id=args.tenant_id,
                 warehouse_concurrency=args.warehouse_concurrency,
+            )
+        )
+    elif args.command == "reconcile-procurement":
+        asyncio.run(
+            reconcile_procurement(
+                tenant_id=args.tenant_id,
+                lookback_days=args.lookback_days,
+                write_batch_size=args.write_batch_size,
+            )
+        )
+    elif args.command == "refresh-inventory-analytics":
+        asyncio.run(
+            refresh_inventory_analytics(
+                tenant_id=args.tenant_id,
+                warehouse_concurrency=args.warehouse_concurrency,
+            )
+        )
+    elif args.command == "configure-webhooks":
+        asyncio.run(
+            configure_webhooks(
+                tenant_slug=args.tenant_slug,
+                base_url=args.base_url,
             )
         )
     elif args.command == "import-opening-inventory":

@@ -62,3 +62,24 @@ def test_document_line_projection_calculates_total_when_the_api_does_not_send_on
 
     assert result["item_alegra_id"] == "I-1"
     assert result["line_total"] == Decimal("37500")
+
+
+def test_purchase_order_projection_keeps_supplier_delivery_and_warehouse() -> None:
+    result = _projection_fields(
+        "purchase_order",
+        {
+            "date": "2026-08-28",
+            "deliveryDate": "2026-09-04",
+            "status": "open",
+            "provider": {"id": "P-1", "name": "Proveedor Uno"},
+            "warehouse": {"id": "W-1"},
+            "currency": {"code": "COP"},
+            "total": "2500000",
+        },
+        "PO-1",
+    )
+
+    assert result["provider_alegra_id"] == "P-1"
+    assert result["delivery_date"].isoformat() == "2026-09-04"
+    assert result["warehouse_alegra_id"] == "W-1"
+    assert result["total"] == Decimal("2500000")

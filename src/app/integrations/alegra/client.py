@@ -166,6 +166,42 @@ class AlegraClient:
                 return nested
         return payload
 
+    async def create_purchase_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create an approved purchase-order draft in Alegra."""
+        result = await self._request_json("POST", "/purchase-orders", json=payload)
+        if not isinstance(result, dict):
+            raise AlegraPermanentError("Alegra returned an unexpected purchase-order response")
+        return result
+
+    async def list_webhook_subscriptions(self) -> list[dict[str, Any]]:
+        result = await self._get_json("/webhooks/subscriptions", params={})
+        if isinstance(result, list):
+            return [row for row in result if isinstance(row, dict)]
+        if isinstance(result, dict):
+            data = result.get("data") or result.get("subscriptions") or []
+            return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+        raise AlegraPermanentError("Alegra returned an unexpected webhook subscription response")
+
+    async def create_webhook_subscription(self, *, event: str, url: str) -> dict[str, Any]:
+        result = await self._request_json(
+            "POST", "/webhooks/subscriptions", json={"event": event, "url": url}
+        )
+        if not isinstance(result, dict):
+            raise AlegraPermanentError("Alegra returned an unexpected webhook response")
+        return result
+
+    async def update_webhook_subscription(
+        self, subscription_id: str, *, url: str
+    ) -> dict[str, Any]:
+        result = await self._request_json(
+            "PUT",
+            f"/webhooks/subscriptions/{quote(subscription_id, safe='')}",
+            json={"url": url},
+        )
+        if not isinstance(result, dict):
+            raise AlegraPermanentError("Alegra returned an unexpected webhook response")
+        return result
+
     async def iter_all_resource(
         self,
         resource: AlegraResource,
@@ -278,10 +314,22 @@ class AlegraClient:
         return await self.get_resource(resource, str(external_id))
 
     async def _get_json(self, path: str, *, params: dict[str, str | int]) -> Any:
+        return await self._request_json("GET", path, params=params)
+
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str | int] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> Any:
         for attempt in range(1, self._max_retries + 1):
             await self._wait_for_rate_slot()
             try:
-                response = await self._client.get(path, params=params, headers=self._headers)
+                response = await self._client.request(
+                    method, path, params=params or {}, json=json, headers=self._headers
+                )
             except httpx.RequestError as error:
                 if attempt == self._max_retries:
                     raise AlegraRetryableError(

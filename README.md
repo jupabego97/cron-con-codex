@@ -46,8 +46,8 @@ python -m app.cli backfill-all <tenant-uuid> --resources all --requests-per-minu
 ```
 
 El segundo comando descarga el historial de contactos, productos, bodegas,
-vendedores, facturas de venta y compra, pagos, notas credito, ajustes y
-transferencias de inventario. La guia completa esta en
+vendedores, facturas de venta y compra, órdenes de compra, pagos, notas credito,
+ajustes y transferencias de inventario. La guia completa esta en
 `docs/architecture/phase-3-historical-backfill.md`.
 
 ## Data mart analitico
@@ -134,6 +134,31 @@ El reporte de Ventas conserva la hora de emisión de las facturas y muestra una
 distribución por hora local (`America/Bogota`). Después de desplegar la migración
 correspondiente, ejecuta una vez `python -m app.cli refresh-mart <tenant-uuid>`
 para poblar `fact_sales_line.issued_at` y `sale_hour_local`.
+
+## Planeación de abastecimiento
+
+La pestaña **Reponer** usa demanda bruta de facturas de venta, devoluciones por
+separado, inventario materializado, compras históricas y cantidades en tránsito
+de órdenes de compra. Clasifica referencias ABC/XYZ, evalúa modelos para demanda
+continua e intermitente, aplica nivel de servicio, plazo, MOQ, múltiplo de empaque
+y presupuesto semanal. Los inventarios negativos y costos faltantes se envían a
+revisión; nunca generan una compra automática.
+
+Comandos operativos:
+
+```powershell
+python -m app.cli backfill-all <tenant-uuid> --resources purchase_order
+python -m app.cli reconcile-procurement <tenant-uuid> --lookback-days 45
+python -m app.cli refresh-inventory-analytics <tenant-uuid>
+python -m app.cli configure-webhooks <tenant-slug> https://<dominio-api>
+```
+
+La creación de órdenes en Alegra exige tres pasos explícitos en el tablero:
+guardar el plan, aprobarlo y confirmar el envío. Cada envío usa una clave
+idempotente para no duplicar pedidos. Alegra no publica eventos webhook para
+órdenes de compra; por eso `reconcile-procurement` es obligatorio como red de
+seguridad. El registrador de webhooks crea o corrige las 12 suscripciones
+soportadas para facturas de venta, facturas de compra, contactos e ítems.
 
 ## Documentación
 

@@ -53,10 +53,12 @@ type FilterData = {
 };
 type Overview = { current: Row[]; previous: Row[]; series: Row[] };
 type ReplenishmentParams = {
-  target_coverage_days: number;
-  lead_time_days: number;
-  safety_days: number;
-  limit: number;
+  weekly_budget: number;
+  review_cycle_days: number;
+  target_coverage_days?: number;
+  lead_time_days?: number;
+  safety_days?: number;
+  limit?: number;
 };
 
 const tabs: Array<[Tab, string]> = [
@@ -107,10 +109,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [replenishmentParams, setReplenishmentParams] = useState<ReplenishmentParams>({
-    target_coverage_days: 30,
-    lead_time_days: 7,
-    safety_days: 7,
-    limit: 500,
+    weekly_budget: 15000000,
+    review_cycle_days: 7,
   });
 
   useEffect(() => {
@@ -138,7 +138,10 @@ export default function App() {
     }
     setLoading(true);
     setError(null);
-    api<Record<string, unknown>>(`/analytics/${tab}${query(filters, tab === "purchase-recommendations" ? replenishmentParams : {})}`)
+    const path = tab === "purchase-recommendations"
+      ? `/procurement/preview${query(filters, { ...replenishmentParams, as_of_date: filters.to_date })}`
+      : `/analytics/${tab}${query(filters)}`;
+    api<Record<string, unknown>>(path)
       .then(setData)
       .catch((requestError: Error) => setError(requestError.message))
       .finally(() => setLoading(false));
@@ -423,6 +426,108 @@ function AIAssistant({ filters }: { filters: Filters }) {
 }
 
 function PurchaseRecommendations({ data, filters, replenishmentParams, setReplenishmentParams }: { data: Record<string, unknown>; filters: Filters; replenishmentParams: ReplenishmentParams; setReplenishmentParams: (value: ReplenishmentParams) => void }) {
+  const rows = (data.lines || []) as RecommendationRow[];
+  const summary = (data.summary || {}) as Row;
+  const quality = (data.data_quality || {}) as Record<string, unknown>;
+  const supplierOrders = (data.supplier_orders || []) as Array<Record<string, unknown>>;
+  const warnings = (quality.warnings || []) as string[];
+  const [planId, setPlanId] = useState<string | null>(null);
+  const [planStatus, setPlanStatus] = useState(String(data.status || "draft"));
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const visibleRows = rows.filter((row) => !["covered"].includes(String(row.decision)));
+
+  useEffect(() => {
+    setPlanId(null);
+    setPlanStatus(String(data.status || "draft"));
+    setActionMessage(null);
+  }, [data]);
+
+  async function persistPlan() {
+    setSaving(true);
+    setActionMessage(null);
+    try {
+      const created = await api<Record<string, unknown>>("/procurement/plans", {
+        method: "POST",
+        body: JSON.stringify({
+          as_of_date: filters.to_date,
+          weekly_budget: replenishmentParams.weekly_budget,
+          currency_code: filters.currency || "COP",
+          review_cycle_days: replenishmentParams.review_cycle_days,
+        }),
+      });
+      setPlanId(String(created.plan_id));
+      setPlanStatus(String(created.status));
+      setActionMessage(created.status === "blocked_data" ? "El plan quedó guardado, pero no puede aprobarse hasta actualizar sus fuentes." : "Plan semanal guardado. Ya puedes aprobarlo.");
+    } catch (requestError) {
+      setActionMessage(requestError instanceof Error ? requestError.message : "No fue posible guardar el plan.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function approvePlan() {
+    if (!planId) return;
+    setSaving(true);
+    try {
+      const approved = await api<Record<string, unknown>>(`/procurement/plans/${planId}/approve`, { method: "POST" });
+      setPlanStatus(String(approved.status));
+      setActionMessage("Plan aprobado. Revisa una última vez antes de enviarlo a Alegra.");
+    } catch (requestError) {
+      setActionMessage(requestError instanceof Error ? requestError.message : "No fue posible aprobar el plan.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function submitPlan() {
+    if (!planId || !window.confirm("¿Crear las órdenes de compra aprobadas en Alegra?")) return;
+    setSaving(true);
+    try {
+      const submitted = await api<Record<string, unknown>>(`/procurement/plans/${planId}/submit-to-alegra`, {
+        method: "POST",
+        body: JSON.stringify({ confirm: true }),
+      });
+      const orders = (submitted.orders || []) as unknown[];
+      setPlanStatus("submitted");
+      setActionMessage(`Se crearon o confirmaron ${orders.length} órdenes en Alegra.`);
+    } catch (requestError) {
+      setActionMessage(requestError instanceof Error ? requestError.message : "No fue posible enviar las órdenes.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <>
+    <div className="section-heading">
+      <div><h2>Reponer</h2><p className="muted">Plan semanal basado en demanda bruta, inventario disponible, mercancía en tránsito, nivel de servicio y desempeño del proveedor.</p></div>
+      <div className="purchase-actions">
+        <button className="primary-button compact-button" disabled={saving || !quality.ready} onClick={persistPlan}>Guardar plan</button>
+        <button className="text-button action-button" disabled={saving || !planId || planStatus !== "draft"} onClick={approvePlan}>Aprobar</button>
+        <button className="text-button action-button danger-action" disabled={saving || !planId || planStatus !== "approved"} onClick={submitPlan}>Enviar a Alegra</button>
+      </div>
+    </div>
+    <section className="filters compact-filters">
+      <label>Presupuesto semanal<input type="number" min="0" step="100000" value={replenishmentParams.weekly_budget} onChange={(event) => setReplenishmentParams({ ...replenishmentParams, weekly_budget: Number(event.target.value) || 0 })} /></label>
+      <label>Ciclo de revisión<input type="number" min="1" max="31" value={replenishmentParams.review_cycle_days} onChange={(event) => setReplenishmentParams({ ...replenishmentParams, review_cycle_days: Number(event.target.value) || 7 })} /></label>
+      <label>Fecha del plan<input value={filters.to_date} readOnly /></label>
+    </section>
+    {!quality.ready && <div className="error"><strong>Plan bloqueado por calidad de datos.</strong>{warnings.map((warning) => <span className="quality-warning" key={warning}>{warning}</span>)}</div>}
+    {quality.ready && <div className="refresh-status">Fuentes listas · inventario {String(quality.snapshot_at || "")} · compras {String(quality.bill_sync_at || "")} · órdenes {String(quality.po_sync_at || "")}</div>}
+    {actionMessage && <div className="warning">{actionMessage}</div>}
+    <section className="cards">
+      <article className="metric-card"><p>Compra recomendada</p><strong>{money(Number(summary.recommended_value || 0))}</strong><small>de {money(replenishmentParams.weekly_budget)} disponibles</small></article>
+      <article className="metric-card"><p>Productos seleccionados</p><strong>{number(summary.recommended_products)}</strong><small>{number(summary.critical_products)} críticos</small></article>
+      <article className="metric-card"><p>Diferidos por presupuesto</p><strong>{number(summary.deferred_by_budget)}</strong><small>priorizados para la siguiente ventana</small></article>
+      <article className="metric-card"><p>Reconciliar inventario</p><strong>{number(summary.reconcile_products)}</strong><small>no se aprueban automáticamente</small></article>
+      <article className="metric-card"><p>Sin demanda</p><strong>{number(summary.dead_or_no_demand)}</strong><small>evitar recompra y revisar liquidación</small></article>
+    </section>
+    <section className="table-card"><h3>Canastas por proveedor</h3>{!supplierOrders.length ? <p className="muted">No hay pedidos aprobables con los datos y presupuesto actuales.</p> : <div className="table-scroll"><table><thead><tr><th>Decisión</th><th>Proveedor</th><th>Productos</th><th>Unidades</th><th>Valor</th><th>Mínimo</th><th>Falta</th><th>Críticos</th></tr></thead><tbody>{supplierOrders.map((order, index) => <tr key={String(order.supplier_key || index)}><td>{String(order.decision)}</td><td>{String(order.supplier || "Sin proveedor")}</td><td>{number(Number(order.lines || 0))}</td><td>{number(Number(order.units || 0))}</td><td>{money(Number(order.estimated_value || 0))}</td><td>{money(Number(order.minimum_order_amount || 0))}</td><td>{money(Number(order.amount_to_minimum || 0))}</td><td>{number(Number(order.critical_lines || 0))}</td></tr>)}</tbody></table></div>}</section>
+    <section className="table-card"><h3>Decisiones por producto</h3><div className="table-scroll"><table className="wide-table"><thead><tr><th>Decisión</th><th>Clase</th><th>Producto</th><th>Proveedor</th><th>Stock</th><th>En tránsito</th><th>Demanda/día</th><th>Cobertura</th><th>Comprar</th><th>Costo</th><th>Valor</th><th>Modelo</th><th>Confianza</th></tr></thead><tbody>{visibleRows.map((row, index) => <tr key={String(row.product_key || index)}><td><strong className={`decision-${String(row.decision)}`}>{String(row.decision)}</strong></td><td><span className="classification-badge">{String(row.abc_class)}{String(row.xyz_class)}</span></td><td>{String(row.name)}<small className="table-subtitle">{String(row.reference || "")} · {String(row.family || "SIN FAMILIA")}</small></td><td>{String(row.supplier || "Por definir")}<small className="table-subtitle">score {number(row.supplier_score)}</small></td><td>{number(row.quantity_on_hand)}</td><td>{number(row.quantity_in_transit)}</td><td>{number(row.daily_forecast)}</td><td>{row.coverage_days == null ? "Sin demanda/agotado" : `${number(row.coverage_days)} días`}</td><td>{number(row.recommended_quantity)}</td><td>{money(Number(row.unit_cost || 0))}</td><td>{money(Number(row.estimated_value || 0))}</td><td>{String(row.forecast_model)}<small className="table-subtitle">WAPE {row.forecast_wape == null ? "n/d" : number(Number(row.forecast_wape) * 100) + "%"}</small></td><td>{String(row.confidence)}<small className="table-subtitle">proveedor {String(row.supplier_confidence || "baja")}</small></td></tr>)}</tbody></table></div></section>
+  </>;
+}
+
+function LegacyPurchaseRecommendations({ data, filters, replenishmentParams, setReplenishmentParams }: { data: Record<string, unknown>; filters: Filters; replenishmentParams: ReplenishmentParams; setReplenishmentParams: (value: ReplenishmentParams) => void }) {
   const rows = (data.items || []) as RecommendationRow[];
   const excessItems = (data.excess_items || []) as RecommendationRow[];
   const slowItems = (data.slow_items || []) as RecommendationRow[];

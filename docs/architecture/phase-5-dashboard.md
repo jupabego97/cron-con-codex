@@ -120,6 +120,41 @@ configurar minimo de pedido, flete, envio gratis, plazo, dias maximos de espera,
 MOQ y multiplo de empaque. El dashboard permite editar las politicas del proveedor
 y marcar un proveedor alternativo como preferido para un producto.
 
-La recomendacion de proveedor es preliminar mientras no se registren pedidos y
-recepciones reales. La siguiente mejora sera capturar fecha prometida, fecha
-recibida, faltantes y variacion de costo para medir cumplimiento del proveedor.
+## Motor de abastecimiento verificable
+
+La versión actual conserva el flujo anterior como datos históricos, pero la
+decisión operativa se calcula con `purchase_orders`, `purchase_order_lines`,
+`replenishment_forecasts`, `purchase_plan_runs`, `purchase_plan_lines` y
+`purchase_plan_orders`.
+
+- La demanda usa ventas brutas; las notas crédito se presentan como devoluciones
+  y no reducen silenciosamente la señal de demanda.
+- Los productos continuos comparan media de 30 días, EWMA y patrón semanal; los
+  intermitentes comparan Croston-SBA, TSB y media de 90 días.
+- La selección usa validaciones temporales, WAPE y sesgo, clasificación ABC/XYZ
+  y niveles de servicio distintos por segmento.
+- La posición de inventario suma existencias no negativas y órdenes abiertas no
+  recibidas. Un stock negativo se pone en cuarentena para conciliación.
+- La cantidad objetivo considera plazo del proveedor, ciclo de revisión, stock de
+  seguridad, MOQ y múltiplo de empaque.
+- El proveedor se puntúa por costo, cumplimiento, entrega a tiempo, plazo,
+  condiciones de pago y vigencia de la relación.
+- El presupuesto se asigna por producto completo en orden de urgencia y valor;
+  lo que no cabe queda visible como diferido, nunca parcialmente oculto.
+
+Antes de calcular una compra, el servicio exige inventario materializado reciente,
+facturas de proveedor y órdenes reconciliadas y un mart posterior al snapshot. La
+creación en Alegra solo está disponible para planes guardados y aprobados, requiere
+confirmación adicional y es idempotente.
+
+En Railway se recomiendan estas ejecuciones:
+
+```text
+Cada hora: python -m app.cli reconcile-procurement <tenant-uuid> --lookback-days 45
+Cada 4 horas: python -m app.cli refresh-inventory-analytics <tenant-uuid>
+Una vez: python -m app.cli backfill-all <tenant-uuid> --resources purchase_order
+Una vez o al cambiar el dominio/secreto: python -m app.cli configure-webhooks <tenant-slug> https://<dominio-api>
+```
+
+Alegra solo admite webhooks para facturas, compras, contactos e ítems. Las órdenes
+de compra se mantienen actuales mediante la reconciliación programada.

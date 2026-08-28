@@ -653,36 +653,54 @@ class AnalyticsQueryService:
     def customers(self, filters: AnalyticsFilters) -> dict[str, Any]:
         where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
         return {
-            "summary": self._rows(f"""SELECT f.currency_code, count(DISTINCT f.contact_key) AS customers,
+            "summary": self._rows(
+                f"""SELECT f.currency_code, count(DISTINCT f.contact_key) AS customers,
                 count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
                 COALESCE(sum(f.net_sales_amount),0) AS amount
                 FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key
-                WHERE {where} GROUP BY f.currency_code ORDER BY f.currency_code""", params),
-            "by_customer": self._rows(f"""SELECT COALESCE(c.name,'Sin cliente') AS label, f.currency_code,
+                WHERE {where} GROUP BY f.currency_code ORDER BY f.currency_code""",
+                params,
+            ),
+            "by_customer": self._rows(
+                f"""SELECT COALESCE(c.name,'Sin cliente') AS label, f.currency_code,
                 COALESCE(sum(f.net_sales_amount),0) AS amount, count(DISTINCT f.document_alegra_id) AS documents
                 FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key LEFT JOIN dim_contact c ON c.key=f.contact_key
-                WHERE {where} GROUP BY label,f.currency_code ORDER BY amount DESC LIMIT 20""", params),
-            "recent_customers": self._rows(f"""SELECT COALESCE(c.name,'Sin cliente') AS label, max(d.calendar_date) AS last_purchase,
+                WHERE {where} GROUP BY label,f.currency_code ORDER BY amount DESC LIMIT 20""",
+                params,
+            ),
+            "recent_customers": self._rows(
+                f"""SELECT COALESCE(c.name,'Sin cliente') AS label, max(d.calendar_date) AS last_purchase,
                 COALESCE(sum(f.net_sales_amount),0) AS amount
                 FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key LEFT JOIN dim_contact c ON c.key=f.contact_key
-                WHERE {where} GROUP BY label ORDER BY last_purchase DESC LIMIT 20""", params),
+                WHERE {where} GROUP BY label ORDER BY last_purchase DESC LIMIT 20""",
+                params,
+            ),
         }
 
     def products(self, filters: AnalyticsFilters) -> dict[str, Any]:
         where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
         return {
-            "summary": self._rows(f"""SELECT f.currency_code, count(DISTINCT f.product_key) AS products,
+            "summary": self._rows(
+                f"""SELECT f.currency_code, count(DISTINCT f.product_key) AS products,
                 COALESCE(sum(f.quantity),0) AS units, COALESCE(sum(f.net_sales_amount),0) AS amount
                 FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key WHERE {where}
-                GROUP BY f.currency_code ORDER BY f.currency_code""", params),
-            "best_sellers": self._rows(f"""SELECT COALESCE(p.name,'Sin producto') AS label, f.currency_code,
+                GROUP BY f.currency_code ORDER BY f.currency_code""",
+                params,
+            ),
+            "best_sellers": self._rows(
+                f"""SELECT COALESCE(p.name,'Sin producto') AS label, f.currency_code,
                 COALESCE(sum(f.net_sales_amount),0) AS amount, COALESCE(sum(f.quantity),0) AS quantity
                 FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key LEFT JOIN dim_product p ON p.key=f.product_key
-                WHERE {where} GROUP BY label,f.currency_code ORDER BY amount DESC LIMIT 25""", params),
-            "by_type": self._rows(f"""SELECT COALESCE(p.item_type,'Sin tipo') AS label, f.currency_code,
+                WHERE {where} GROUP BY label,f.currency_code ORDER BY amount DESC LIMIT 25""",
+                params,
+            ),
+            "by_type": self._rows(
+                f"""SELECT COALESCE(p.item_type,'Sin tipo') AS label, f.currency_code,
                 COALESCE(sum(f.net_sales_amount),0) AS amount, COALESCE(sum(f.quantity),0) AS quantity
                 FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key LEFT JOIN dim_product p ON p.key=f.product_key
-                WHERE {where} GROUP BY label,f.currency_code ORDER BY amount DESC""", params),
+                WHERE {where} GROUP BY label,f.currency_code ORDER BY amount DESC""",
+                params,
+            ),
             "stock_coverage": self._stock_coverage(),
         }
 
@@ -770,8 +788,9 @@ class AnalyticsQueryService:
             allow_status=True,
             allow_provider=True,
         )
-        sales = self._one(
-            f"""
+        sales = (
+            self._one(
+                f"""
             SELECT count(*) AS lines,
                    count(*) FILTER (WHERE f.product_key IS NULL) AS lines_without_product,
                    count(*) FILTER (WHERE f.contact_key IS NULL) AS lines_without_customer,
@@ -784,10 +803,13 @@ class AnalyticsQueryService:
             FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
             WHERE {sales_where}
             """,
-            sales_params,
-        ) or {}
-        purchases = self._one(
-            f"""
+                sales_params,
+            )
+            or {}
+        )
+        purchases = (
+            self._one(
+                f"""
             SELECT count(*) AS lines,
                    count(*) FILTER (WHERE f.product_key IS NULL) AS lines_without_product,
                    count(*) FILTER (WHERE f.provider_key IS NULL) AS lines_without_supplier,
@@ -795,13 +817,20 @@ class AnalyticsQueryService:
             FROM fact_purchase_line f JOIN dim_date d ON d.date_key = f.date_key
             WHERE {purchase_where}
             """,
-            purchase_params,
-        ) or {}
-        snapshot = self._one(
-            """
+                purchase_params,
+            )
+            or {}
+        )
+        snapshot = (
+            self._one(
+                """
             WITH latest AS (
-                SELECT id FROM inventory_snapshot_runs
-                WHERE tenant_id = :tenant_id AND status = 'succeeded'
+                SELECT r.id FROM inventory_snapshot_runs r
+                WHERE r.tenant_id = :tenant_id AND r.status = 'succeeded'
+                  AND EXISTS (
+                    SELECT 1 FROM fact_inventory_snapshot f
+                    WHERE f.tenant_id = r.tenant_id AND f.snapshot_run_id = r.id
+                  )
                 ORDER BY finished_at DESC LIMIT 1
             )
             SELECT count(*) AS rows,
@@ -813,7 +842,9 @@ class AnalyticsQueryService:
             JOIN latest ON latest.id = f.snapshot_run_id
             WHERE f.tenant_id = :tenant_id
             """
-        ) or {}
+            )
+            or {}
+        )
         return {
             "filters": _filter_period_summary(filters),
             "sales": sales,
@@ -840,8 +871,10 @@ class AnalyticsQueryService:
         recalculation of inventory and demand.
         """
         run = self._one(
-            "SELECT id, finished_at FROM inventory_snapshot_runs "
-            "WHERE tenant_id=:tenant_id AND status='succeeded' "
+            "SELECT r.id, r.finished_at FROM inventory_snapshot_runs r "
+            "WHERE r.tenant_id=:tenant_id AND r.status='succeeded' "
+            "AND EXISTS (SELECT 1 FROM fact_inventory_snapshot f "
+            "WHERE f.tenant_id=r.tenant_id AND f.snapshot_run_id=r.id) "
             "ORDER BY finished_at DESC LIMIT 1"
         )
         parameters = {
@@ -856,9 +889,7 @@ class AnalyticsQueryService:
             # Pre-2025 inventory history is not considered reliable for
             # replenishment.  Purchases are only used as a recent lot-size
             # reference, never as an inferred stock balance.
-            "purchase_history_from": max(
-                date(2025, 1, 1), filters.to_date - timedelta(days=365)
-            ),
+            "purchase_history_from": max(date(2025, 1, 1), filters.to_date - timedelta(days=365)),
             "purchase_history_to": filters.to_date,
             "review_status": review_status,
         }
@@ -1083,9 +1114,7 @@ class AnalyticsQueryService:
             history_from=parameters["purchase_history_from"],
             history_to=filters.to_date,
         )
-        policy_context = self._replenishment_policy_context(
-            (filters.currency or "COP").upper()
-        )
+        policy_context = self._replenishment_policy_context((filters.currency or "COP").upper())
         items = self._decorate_replenishment_items(
             raw_items,
             policy_context=policy_context,
@@ -1112,8 +1141,7 @@ class AnalyticsQueryService:
             "recommended_products": len(items),
             "critical_products": sum(1 for item in items if item["priority"] == "critical"),
             "suppliers_to_buy": sum(
-                1 for order in supplier_orders
-                if order["decision"] in {"buy_now", "complete_order"}
+                1 for order in supplier_orders if order["decision"] in {"buy_now", "complete_order"}
             ),
             "suppliers_to_accumulate": sum(
                 1 for order in supplier_orders if order["decision"] == "accumulate"
@@ -1255,8 +1283,7 @@ class AnalyticsQueryService:
         return {
             "suppliers": {int(row["supplier_key"]): row for row in supplier_rows},
             "products": {
-                (int(row["product_key"]), int(row["supplier_key"])): row
-                for row in product_rows
+                (int(row["product_key"]), int(row["supplier_key"])): row for row in product_rows
             },
             "preferred": {int(row["product_key"]): row for row in preferred_rows},
         }
@@ -1284,9 +1311,7 @@ class AnalyticsQueryService:
             purchase_events = int(purchase.get("purchase_events_365d", 0) or 0)
             last_purchase_date = purchase.get("last_purchase_date")
             if purchase_events >= 2 and purchase.get("first_purchase_date") and last_purchase_date:
-                purchase_span = (
-                    last_purchase_date - purchase["first_purchase_date"]
-                ).days
+                purchase_span = (last_purchase_date - purchase["first_purchase_date"]).days
                 purchase_cycle_days = Decimal(str(purchase_span)) / Decimal(
                     str(purchase_events - 1)
                 )
@@ -1300,9 +1325,11 @@ class AnalyticsQueryService:
             else:
                 purchase_lot_reference = last_purchase_quantity
                 lot_reference_source = "ultima_compra" if last_purchase_quantity else None
-            if purchase_events >= 3 and last_purchase_date and (
-                date.today() - last_purchase_date
-            ).days <= 180:
+            if (
+                purchase_events >= 3
+                and last_purchase_date
+                and (date.today() - last_purchase_date).days <= 180
+            ):
                 purchase_history_confidence = "alta"
             elif purchase_events >= 1:
                 purchase_history_confidence = "media"
@@ -1313,17 +1340,13 @@ class AnalyticsQueryService:
                     "purchase_history_from": history_from,
                     "purchase_history_to": purchase_context.get("history_to"),
                     "purchase_events_365d": purchase_events,
-                    "purchase_events_90d": int(
-                        purchase.get("purchase_events_90d", 0) or 0
-                    ),
+                    "purchase_events_90d": int(purchase.get("purchase_events_90d", 0) or 0),
                     "first_purchase_date": purchase.get("first_purchase_date"),
                     "last_purchase_any_date": last_purchase_date,
                     "last_purchase_date": last_purchase_date,
                     "last_purchase_quantity": last_purchase_quantity,
                     "median_purchase_quantity": median_purchase_quantity,
-                    "average_purchase_quantity": purchase.get(
-                        "average_purchase_quantity"
-                    ),
+                    "average_purchase_quantity": purchase.get("average_purchase_quantity"),
                     "purchase_cycle_days": purchase_cycle_days,
                     "purchase_lot_reference": purchase_lot_reference,
                     "lot_reference_source": lot_reference_source,
@@ -1348,19 +1371,13 @@ class AnalyticsQueryService:
             supplier_key = int(supplier_key) if supplier_key is not None else None
             supplier_policy = suppliers.get(supplier_key) if supplier_key is not None else None
             product_policy = (
-                products.get((product_key, supplier_key))
-                if supplier_key is not None
-                else None
+                products.get((product_key, supplier_key)) if supplier_key is not None else None
             )
             item["minimum_order_quantity"] = (
-                product_policy.get("minimum_order_quantity")
-                if product_policy is not None
-                else None
+                product_policy.get("minimum_order_quantity") if product_policy is not None else None
             )
             item["pack_size"] = (
-                product_policy.get("pack_size")
-                if product_policy is not None
-                else Decimal("1")
+                product_policy.get("pack_size") if product_policy is not None else Decimal("1")
             )
             item["effective_lead_time_days"] = int(
                 (
@@ -1383,9 +1400,7 @@ class AnalyticsQueryService:
                 or 7
             )
             item["minimum_order_amount"] = (
-                supplier_policy.get("minimum_order_amount")
-                if supplier_policy is not None
-                else None
+                supplier_policy.get("minimum_order_amount") if supplier_policy is not None else None
             )
             item["shipping_cost"] = (
                 supplier_policy.get("shipping_cost") or Decimal("0")
@@ -1444,17 +1459,11 @@ class AnalyticsQueryService:
             stock_for_replenishment = max(stock, Decimal("0"))
             stock_discrepancy = max(-stock, Decimal("0"))
             inventory_exception = (
-                "stock_negativo"
-                if stock < 0
-                else "stock_cero"
-                if stock == 0
-                else "ninguna"
+                "stock_negativo" if stock < 0 else "stock_cero" if stock == 0 else "ninguna"
             )
             minimum = Decimal(str(item.get("minimum_order_quantity", 0) or 0))
             pack = Decimal(str(item.get("pack_size", 1) or 1))
-            order_up_to_days = (
-                target_coverage_days + item["effective_lead_time_days"] + safety_days
-            )
+            order_up_to_days = target_coverage_days + item["effective_lead_time_days"] + safety_days
             base_quantity = max(
                 daily_velocity * order_up_to_days - stock_for_replenishment,
                 Decimal("0"),
@@ -1472,9 +1481,9 @@ class AnalyticsQueryService:
             item["recommended_quantity"] = quantity
             lot_reference = Decimal(str(purchase_lot_reference or 0))
             if base_quantity > 0 and lot_reference > 0:
-                lot_quantity = (
-                    base_quantity / lot_reference
-                ).to_integral_value(rounding=ROUND_CEILING) * lot_reference
+                lot_quantity = (base_quantity / lot_reference).to_integral_value(
+                    rounding=ROUND_CEILING
+                ) * lot_reference
             else:
                 lot_quantity = Decimal("0")
             item["suggested_quantity_by_historical_lot"] = lot_quantity
@@ -1507,9 +1516,7 @@ class AnalyticsQueryService:
                 else "ok"
             )
             item["replenishment_warning"] = (
-                "Reconciliar stock negativo antes de comprar"
-                if stock < 0
-                else None
+                "Reconciliar stock negativo antes de comprar" if stock < 0 else None
             )
             item["estimated_purchase_value"] = quantity * Decimal(
                 str(item.get("unit_cost", 0) or 0)
@@ -1531,8 +1538,7 @@ class AnalyticsQueryService:
         supplier_policy = suppliers.get(supplier_key)
         product_policy = products.get((product_key, supplier_key))
         result["is_preferred"] = bool(
-            result.get("is_preferred")
-            or (product_policy and product_policy.get("is_preferred"))
+            result.get("is_preferred") or (product_policy and product_policy.get("is_preferred"))
         )
         result["policy_source"] = (
             "producto" if product_policy else "proveedor" if supplier_policy else "estandar"
@@ -1566,7 +1572,9 @@ class AnalyticsQueryService:
         recent = 25 if result.get("last_purchase_date") else 0
         history = 15 if int(result.get("purchase_lines", 0) or 0) >= 3 else 0
         modal = 15 if result.get("is_modal") else 0
-        result["supplier_score"] = min(Decimal("100"), line_share * Decimal("0.45") + recent + history + modal)
+        result["supplier_score"] = min(
+            Decimal("100"), line_share * Decimal("0.45") + recent + history + modal
+        )
         return result
 
     def _supplier_purchase_plans(
@@ -1996,35 +2004,54 @@ class AnalyticsQueryService:
         }
 
     def alerts(self) -> dict[str, Any]:
-        run = self._one("""SELECT id FROM inventory_snapshot_runs WHERE tenant_id=:tenant_id AND status='succeeded'
-            ORDER BY finished_at DESC LIMIT 1""")
+        run = self._one("""SELECT r.id FROM inventory_snapshot_runs r
+            WHERE r.tenant_id=:tenant_id AND r.status='succeeded'
+              AND EXISTS (SELECT 1 FROM fact_inventory_snapshot f
+                          WHERE f.tenant_id=r.tenant_id AND f.snapshot_run_id=r.id)
+            ORDER BY r.finished_at DESC LIMIT 1""")
         if run is None:
             return {"summary": [], "stockouts": [], "negative_stock": [], "slow_stock": []}
         params = {"snapshot_run_id": run["id"]}
         return {
-            "summary": self._rows("""SELECT 'Agotados con venta reciente' AS label, count(*) AS count FROM (
+            "summary": self._rows(
+                """SELECT 'Agotados con venta reciente' AS label, count(*) AS count FROM (
                 SELECT f.product_key FROM fact_inventory_snapshot f WHERE f.tenant_id=:tenant_id AND f.snapshot_run_id=:snapshot_run_id
                 GROUP BY f.product_key HAVING sum(f.quantity_on_hand)<=0) stock
                 JOIN fact_sales_line s ON s.tenant_id=:tenant_id AND s.product_key=stock.product_key
-                JOIN dim_date d ON d.date_key=s.date_key WHERE s.is_deleted=false AND d.calendar_date>=current_date-interval '90 days'""", params),
-            "stockouts": self._rows("""SELECT COALESCE(p.name,'Sin producto') AS label, COALESCE(sum(f.quantity_on_hand),0) AS quantity
+                JOIN dim_date d ON d.date_key=s.date_key WHERE s.is_deleted=false AND d.calendar_date>=current_date-interval '90 days'""",
+                params,
+            ),
+            "stockouts": self._rows(
+                """SELECT COALESCE(p.name,'Sin producto') AS label, COALESCE(sum(f.quantity_on_hand),0) AS quantity
                 FROM fact_inventory_snapshot f LEFT JOIN dim_product p ON p.key=f.product_key
                 WHERE f.tenant_id=:tenant_id AND f.snapshot_run_id=:snapshot_run_id GROUP BY label HAVING sum(f.quantity_on_hand)<=0
-                ORDER BY quantity LIMIT 50""", params),
-            "negative_stock": self._rows("""SELECT COALESCE(p.name,'Sin producto') AS label, COALESCE(sum(f.quantity_on_hand),0) AS quantity
+                ORDER BY quantity LIMIT 50""",
+                params,
+            ),
+            "negative_stock": self._rows(
+                """SELECT COALESCE(p.name,'Sin producto') AS label, COALESCE(sum(f.quantity_on_hand),0) AS quantity
                 FROM fact_inventory_snapshot f LEFT JOIN dim_product p ON p.key=f.product_key
-                WHERE f.tenant_id=:tenant_id AND f.snapshot_run_id=:snapshot_run_id GROUP BY label HAVING sum(f.quantity_on_hand)<0 ORDER BY quantity LIMIT 50""", params),
+                WHERE f.tenant_id=:tenant_id AND f.snapshot_run_id=:snapshot_run_id GROUP BY label HAVING sum(f.quantity_on_hand)<0 ORDER BY quantity LIMIT 50""",
+                params,
+            ),
             "slow_stock": self._stock_without_sales(params),
         }
 
     def _stock_coverage(self) -> list[dict[str, Any]]:
-        run = self._one("SELECT id FROM inventory_snapshot_runs WHERE tenant_id=:tenant_id AND status='succeeded' ORDER BY finished_at DESC LIMIT 1")
+        run = self._one("""SELECT r.id FROM inventory_snapshot_runs r
+            WHERE r.tenant_id=:tenant_id AND r.status='succeeded'
+              AND EXISTS (SELECT 1 FROM fact_inventory_snapshot f
+                          WHERE f.tenant_id=r.tenant_id AND f.snapshot_run_id=r.id)
+            ORDER BY r.finished_at DESC LIMIT 1""")
         if run is None:
             return []
-        return self._rows("""WITH stock AS (SELECT product_key,sum(quantity_on_hand) quantity FROM fact_inventory_snapshot WHERE tenant_id=:tenant_id AND snapshot_run_id=:run GROUP BY product_key),
+        return self._rows(
+            """WITH stock AS (SELECT product_key,sum(quantity_on_hand) quantity FROM fact_inventory_snapshot WHERE tenant_id=:tenant_id AND snapshot_run_id=:run GROUP BY product_key),
           sales AS (SELECT product_key,sum(quantity) quantity FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key WHERE f.tenant_id=:tenant_id AND f.is_deleted=false AND d.calendar_date>=current_date-interval '30 days' GROUP BY product_key)
           SELECT COALESCE(p.name,'Sin producto') label,stock.quantity,round(stock.quantity/nullif(sales.quantity/30,0),1) AS coverage_days
-          FROM stock JOIN sales ON sales.product_key=stock.product_key LEFT JOIN dim_product p ON p.key=stock.product_key WHERE stock.quantity>0 ORDER BY coverage_days ASC NULLS LAST LIMIT 30""", {"run":run["id"]})
+          FROM stock JOIN sales ON sales.product_key=stock.product_key LEFT JOIN dim_product p ON p.key=stock.product_key WHERE stock.quantity>0 ORDER BY coverage_days ASC NULLS LAST LIMIT 30""",
+            {"run": run["id"]},
+        )
 
     def _sales_kpis(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
         where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
@@ -2141,13 +2168,25 @@ class AnalyticsQueryService:
 
     def _inventory_kpis(self, filters: AnalyticsFilters) -> dict[str, list[dict[str, Any]]]:
         run = self._one(
-            "SELECT id FROM inventory_snapshot_runs WHERE tenant_id=:tenant_id AND status='succeeded' ORDER BY finished_at DESC LIMIT 1"
+            """SELECT r.id FROM inventory_snapshot_runs r
+            WHERE r.tenant_id=:tenant_id AND r.status='succeeded'
+              AND EXISTS (SELECT 1 FROM fact_inventory_snapshot f
+                          WHERE f.tenant_id=r.tenant_id AND f.snapshot_run_id=r.id)
+            ORDER BY r.finished_at DESC LIMIT 1"""
         )
         empty = {"inventory": [], "low_coverage": [], "excess_coverage": [], "slow_inventory": []}
         if run is None:
             return empty
-        stock_clauses = ["f.tenant_id = :tenant_id", "f.snapshot_run_id = :snapshot_run_id", "f.product_key IS NOT NULL"]
-        params: dict[str, Any] = {"snapshot_run_id": run["id"], "from_date": filters.from_date, "to_date": filters.to_date}
+        stock_clauses = [
+            "f.tenant_id = :tenant_id",
+            "f.snapshot_run_id = :snapshot_run_id",
+            "f.product_key IS NOT NULL",
+        ]
+        params: dict[str, Any] = {
+            "snapshot_run_id": run["id"],
+            "from_date": filters.from_date,
+            "to_date": filters.to_date,
+        }
         if filters.product_key is not None:
             stock_clauses.append("f.product_key = :product_key")
             params["product_key"] = filters.product_key
@@ -2155,7 +2194,9 @@ class AnalyticsQueryService:
             stock_clauses.append("f.warehouse_key = :warehouse_key")
             params["warehouse_key"] = filters.warehouse_key
         stock_where = " AND ".join(stock_clauses)
-        demand_where, demand_params = self._fact_where(filters, alias="s", allow_seller=True, allow_status=True, allow_warehouse=False)
+        demand_where, demand_params = self._fact_where(
+            filters, alias="s", allow_seller=True, allow_status=True, allow_warehouse=False
+        )
         params.update(demand_params)
         base = f"""
             WITH stock AS (
@@ -2229,21 +2270,32 @@ class AnalyticsQueryService:
         }
 
     def _stock_without_sales(self, params: dict[str, Any]) -> list[dict[str, Any]]:
-        return self._rows("""SELECT COALESCE(p.name,'Sin producto') AS label,sum(f.quantity_on_hand) AS quantity
+        return self._rows(
+            """SELECT COALESCE(p.name,'Sin producto') AS label,sum(f.quantity_on_hand) AS quantity
           FROM fact_inventory_snapshot f LEFT JOIN dim_product p ON p.key=f.product_key WHERE f.tenant_id=:tenant_id AND f.snapshot_run_id=:snapshot_run_id
           AND NOT EXISTS (SELECT 1 FROM fact_sales_line s JOIN dim_date d ON d.date_key=s.date_key WHERE s.tenant_id=f.tenant_id AND s.product_key=f.product_key AND s.is_deleted=false AND d.calendar_date>=current_date-interval '90 days')
-          GROUP BY label HAVING sum(f.quantity_on_hand)>0 ORDER BY quantity DESC LIMIT 30""", params)
+          GROUP BY label HAVING sum(f.quantity_on_hand)>0 ORDER BY quantity DESC LIMIT 30""",
+            params,
+        )
 
     def _inventory_snapshot(self, filters: AnalyticsFilters) -> dict[str, Any]:
         run = self._one(
             """
-            SELECT id, finished_at FROM inventory_snapshot_runs
-            WHERE tenant_id = :tenant_id AND status = 'succeeded'
-            ORDER BY finished_at DESC LIMIT 1
+            SELECT r.id, r.finished_at FROM inventory_snapshot_runs r
+            WHERE r.tenant_id = :tenant_id AND r.status = 'succeeded'
+              AND EXISTS (SELECT 1 FROM fact_inventory_snapshot f
+                          WHERE f.tenant_id=r.tenant_id AND f.snapshot_run_id=r.id)
+            ORDER BY r.finished_at DESC LIMIT 1
             """
         )
         if run is None:
-            return {"captured_at": None, "summary": [], "by_product": [], "by_warehouse": [], "items": []}
+            return {
+                "captured_at": None,
+                "summary": [],
+                "by_product": [],
+                "by_warehouse": [],
+                "items": [],
+            }
         clauses = ["f.tenant_id = :tenant_id", "f.snapshot_run_id = :snapshot_run_id"]
         params: dict[str, Any] = {"snapshot_run_id": run["id"]}
         if filters.product_key is not None:
@@ -2346,7 +2398,11 @@ class AnalyticsQueryService:
     def _sales_series(self, filters: AnalyticsFilters) -> list[dict[str, Any]]:
         where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
         granularity = "month" if (filters.to_date - filters.from_date).days > 92 else "day"
-        period = "date_trunc('month', d.calendar_date)::date" if granularity == "month" else "d.calendar_date"
+        period = (
+            "date_trunc('month', d.calendar_date)::date"
+            if granularity == "month"
+            else "d.calendar_date"
+        )
         return self._rows(
             f"""
             SELECT {period} AS period, f.currency_code,
@@ -2538,10 +2594,22 @@ class AnalyticsQueryService:
 
     def _sales_breakdown(self, filters: AnalyticsFilters, kind: str) -> list[dict[str, Any]]:
         columns = {
-            "product": ("LEFT JOIN dim_product dimension ON dimension.key = f.product_key", "dimension.name"),
-            "seller": ("LEFT JOIN dim_seller dimension ON dimension.key = f.seller_key", "dimension.name"),
-            "warehouse": ("LEFT JOIN dim_warehouse dimension ON dimension.key = f.warehouse_key", "dimension.name"),
-            "customer": ("LEFT JOIN dim_contact dimension ON dimension.key = f.contact_key", "dimension.name"),
+            "product": (
+                "LEFT JOIN dim_product dimension ON dimension.key = f.product_key",
+                "dimension.name",
+            ),
+            "seller": (
+                "LEFT JOIN dim_seller dimension ON dimension.key = f.seller_key",
+                "dimension.name",
+            ),
+            "warehouse": (
+                "LEFT JOIN dim_warehouse dimension ON dimension.key = f.warehouse_key",
+                "dimension.name",
+            ),
+            "customer": (
+                "LEFT JOIN dim_contact dimension ON dimension.key = f.contact_key",
+                "dimension.name",
+            ),
             "status": ("", "f.document_status"),
         }
         join, label = columns[kind]

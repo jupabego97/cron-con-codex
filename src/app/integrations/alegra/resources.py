@@ -34,6 +34,12 @@ BUSINESS_RESOURCES: tuple[AlegraResource, ...] = (
     ),
     AlegraResource("invoice", "/invoices", ("invoice",), hydrate_details_by_default=True),
     AlegraResource("bill", "/bills", ("bill",), hydrate_details_by_default=True),
+    AlegraResource(
+        "purchase_order",
+        "/purchase-orders",
+        ("purchaseOrder", "purchase_order"),
+        hydrate_details_by_default=True,
+    ),
     AlegraResource("payment", "/payments", ("payment",)),
     AlegraResource(
         "credit_note",

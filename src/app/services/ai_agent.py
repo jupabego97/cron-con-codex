@@ -21,6 +21,7 @@ from app.services.analytics_queries import (
     AnalyticsFilters,
     AnalyticsQueryService,
 )
+from app.services.procurement_planning import ProcurementPlanningService
 
 logger = logging.getLogger(__name__)
 
@@ -70,14 +71,13 @@ TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "name": "get_replenishment_plan",
         "description": (
-            "Obtiene la cola de reposicion explicable por producto y el plan agrupado "
-            "por proveedor, incluyendo ultima compra, lote historico y confianza."
+            "Obtiene el plan predictivo de reposicion por producto y proveedor, con "
+            "ABC/XYZ, pronostico, stock en transito, presupuesto y calidad de datos."
         ),
         "parameters": _filter_schema(
             {
-                "target_coverage_days": {"type": "integer", "minimum": 7, "maximum": 365},
-                "lead_time_days": {"type": "integer", "minimum": 0, "maximum": 90},
-                "safety_days": {"type": "integer", "minimum": 0, "maximum": 90},
+                "weekly_budget": {"type": "number", "minimum": 0},
+                "review_cycle_days": {"type": "integer", "minimum": 1, "maximum": 31},
             }
         ),
     },
@@ -354,9 +354,7 @@ class RetailAIAgent:
                 store=False,
             )
             function_calls = [
-                item
-                for item in response.output
-                if getattr(item, "type", None) == "function_call"
+                item for item in response.output if getattr(item, "type", None) == "function_call"
             ]
             if not function_calls:
                 return response
@@ -421,9 +419,7 @@ class RetailAIAgent:
             previous_id = str(response.id)
             self._set_provider_conversation_id(conversation_id, previous_id)
             function_calls = [
-                step
-                for step in response.steps
-                if getattr(step, "type", None) == "function_call"
+                step for step in response.steps if getattr(step, "type", None) == "function_call"
             ]
             if not function_calls:
                 return response
@@ -500,22 +496,20 @@ class RetailAIAgent:
                 "alerts": self._analytics.alerts(),
             }
         if name == "get_replenishment_plan":
-            result = self._analytics.purchase_recommendations(
-                filters,
-                target_coverage_days=_bounded_int(arguments, "target_coverage_days", 30, 7, 365),
-                lead_time_days=_bounded_int(arguments, "lead_time_days", 7, 0, 90),
-                safety_days=_bounded_int(arguments, "safety_days", 7, 0, 90),
-                limit=80,
+            result = ProcurementPlanningService(
+                session=self._session, tenant_id=self._tenant_id
+            ).preview(
+                as_of=filters.to_date,
+                weekly_budget=Decimal(str(arguments.get("weekly_budget", 15000000))),
+                currency_code=filters.currency or "COP",
+                review_cycle_days=_bounded_int(arguments, "review_cycle_days", 7, 1, 31),
             )
             return {
                 "filters": _filter_summary(filters),
-                "parameters": result.get("parameters"),
-                "snapshot_at": result.get("snapshot_at"),
+                "data_quality": result.get("data_quality"),
                 "summary": result.get("summary"),
-                "items": result.get("items", [])[:80],
+                "items": result.get("lines", [])[:80],
                 "supplier_orders": result.get("supplier_orders", [])[:80],
-                "excess_items": result.get("excess_items", [])[:30],
-                "slow_items": result.get("slow_items", [])[:30],
             }
         if name == "get_sales_analysis":
             result = self._analytics.sales(filters)
@@ -842,8 +836,10 @@ def _analysis_plan(message: str) -> dict[str, Any]:
         "viernes",
         "sabado",
     )
-    if "por hora" in question or "hora de venta" in question or any(
-        term in question for term in weekday_terms
+    if (
+        "por hora" in question
+        or "hora de venta" in question
+        or any(term in question for term in weekday_terms)
     ):
         add(
             "ventas_por_dia_y_hora",
@@ -929,9 +925,7 @@ def _metric_changes(
                 "current": current_value,
                 "previous": previous_value,
                 "delta": delta,
-                "delta_pct": (delta / previous_value * Decimal("100"))
-                if previous_value
-                else None,
+                "delta_pct": (delta / previous_value * Decimal("100")) if previous_value else None,
             }
         changes.append(change)
     return changes

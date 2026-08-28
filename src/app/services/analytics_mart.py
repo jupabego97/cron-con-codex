@@ -88,11 +88,21 @@ _DIMENSIONS = (
             (tenant_id, alegra_id, source_hash, is_deleted, name, reference, item_type,
              status, inventory_enabled, unit, base_price, current_cost, family_name,
              preferred_supplier_name, updated_at)
-        SELECT tenant_id, alegra_id, source_hash, is_deleted, name, reference, item_type,
-               status, inventory_enabled, unit, base_price, cost,
+        SELECT item.tenant_id, item.alegra_id, item.source_hash, item.is_deleted,
+               item.name, item.reference, item.item_type,
+               item.status,
+               COALESCE(
+                 item.inventory_enabled,
+                 EXISTS (
+                   SELECT 1 FROM inventory_snapshots snapshot
+                   WHERE snapshot.tenant_id = item.tenant_id
+                     AND snapshot.item_alegra_id = item.alegra_id
+                 )
+               ),
+               item.unit, item.base_price, item.cost,
                COALESCE(NULLIF(family_name, ''), 'SIN FAMILIA'),
                NULLIF(preferred_supplier_name, ''), now()
-        FROM catalog_items WHERE tenant_id = :tenant_id
+        FROM catalog_items item WHERE item.tenant_id = :tenant_id
         ON CONFLICT (tenant_id, alegra_id) DO UPDATE SET
           source_hash = EXCLUDED.source_hash, is_deleted = EXCLUDED.is_deleted,
           name = EXCLUDED.name, reference = EXCLUDED.reference, item_type = EXCLUDED.item_type,
@@ -144,6 +154,7 @@ _DIMENSIONS = (
         WITH source_dates AS (
           SELECT issue_date AS calendar_date FROM sales_invoices WHERE tenant_id = :tenant_id
           UNION SELECT issue_date FROM purchase_bills WHERE tenant_id = :tenant_id
+          UNION SELECT order_date FROM purchase_orders WHERE tenant_id = :tenant_id
           UNION SELECT payment_date FROM payments WHERE tenant_id = :tenant_id
           UNION SELECT issue_date FROM credit_notes WHERE tenant_id = :tenant_id
           UNION SELECT adjustment_date FROM inventory_adjustments WHERE tenant_id = :tenant_id

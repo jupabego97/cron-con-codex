@@ -56,3 +56,29 @@ def test_resource_listing_passes_inventory_filters() -> None:
     assert received_params["idWarehouse"] == "42"
     assert received_params["inventariable"] == "true"
     assert received_params["mode"] == "advanced"
+
+
+def test_webhook_subscription_can_be_updated() -> None:
+    received: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received["method"] = request.method
+        received["path"] = request.url.path
+        received["body"] = request.content.decode()
+        return httpx.Response(200, json={"message": "updated"})
+
+    async def update() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            base_url="https://api.alegra.com/api/v1", transport=transport
+        ) as http:
+            alegra = AlegraClient(basic_token="test-token", client=http)
+            await alegra.update_webhook_subscription(
+                "subscription-id", url="https://example.test/webhook?token=secret"
+            )
+
+    asyncio.run(update())
+
+    assert received["method"] == "PUT"
+    assert received["path"].endswith("/webhooks/subscriptions/subscription-id")
+    assert '"url":"https://example.test/webhook?token=secret"' in received["body"]
