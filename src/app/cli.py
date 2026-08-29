@@ -280,23 +280,32 @@ async def configure_webhooks(*, tenant_slug: str, base_url: str) -> None:
         basic_token=settings.alegra_api_basic_token.get_secret_value()
     ) as alegra:
         existing = await alegra.list_webhook_subscriptions()
+        managed_path = f"/webhooks/alegra/{tenant_slug}"
+        exact_by_event = {
+            event: [
+                row
+                for row in existing
+                if str(row.get("event")) == event
+                and str(row.get("url", "")).rstrip("/") == target.rstrip("/")
+            ]
+            for event in required
+        }
+        stale_rows = [
+            row
+            for row in existing
+            if str(row.get("event")) in required
+            and managed_path in str(row.get("url", ""))
+            and row not in exact_by_event[str(row.get("event"))]
+        ]
+        # Alegra limits the number of subscriptions. Remove every callback owned
+        # by this application first, then create replacements in a second phase.
+        for stale in stale_rows:
+            if stale.get("id") is not None:
+                await alegra.delete_webhook_subscription(str(stale["id"]))
+                print(f"{stale.get('event')} removed-stale")
+
         for event in required:
-            subscriptions = [row for row in existing if str(row.get("event")) == event]
-            exact_rows = [
-                row
-                for row in subscriptions
-                if str(row.get("url", "")).rstrip("/") == target.rstrip("/")
-            ]
-            managed_path = f"/webhooks/alegra/{tenant_slug}"
-            stale_rows = [
-                row
-                for row in subscriptions
-                if managed_path in str(row.get("url", "")) and row not in exact_rows
-            ]
-            for stale in stale_rows:
-                if stale.get("id") is not None:
-                    await alegra.delete_webhook_subscription(str(stale["id"]))
-                    print(f"{event} removed-stale")
+            exact_rows = exact_by_event[event]
             exact = exact_rows[0] if exact_rows else None
             if exact is not None:
                 print(f"{event} already-configured")
