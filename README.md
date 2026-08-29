@@ -159,6 +159,8 @@ idempotente para no duplicar pedidos. Alegra no publica eventos webhook para
 órdenes de compra; por eso `reconcile-procurement` es obligatorio como red de
 seguridad. El registrador de webhooks crea o corrige las 12 suscripciones
 soportadas para facturas de venta, facturas de compra, contactos e ítems.
+El comando recibe un dominio `https://`; valida el callback con HTTPS y adapta
+el valor al formato sin esquema que exige el endpoint de suscripciones de Alegra.
 
 ## Documentación
 

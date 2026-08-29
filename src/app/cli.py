@@ -255,9 +255,12 @@ async def configure_webhooks(*, tenant_slug: str, base_url: str) -> None:
     if not root.startswith("https://"):
         raise ValueError("base_url must start with https://")
     query = urlencode({"token": settings.alegra_webhook_secret.get_secret_value()})
-    target = f"{root}/webhooks/alegra/{tenant_slug}?{query}"
+    callback_target = f"{root}/webhooks/alegra/{tenant_slug}?{query}"
+    # Alegra validates the callback over HTTPS but its subscription endpoint
+    # rejects a URL value that includes the scheme and stores it without one.
+    target = callback_target.removeprefix("https://")
     async with httpx.AsyncClient(timeout=10) as callback_client:
-        callback_response = await callback_client.post(target, content=b"")
+        callback_response = await callback_client.post(callback_target, content=b"")
     if not 200 <= callback_response.status_code < 300:
         raise RuntimeError(
             f"Webhook callback validation failed with HTTP {callback_response.status_code}"
