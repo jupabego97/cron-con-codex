@@ -111,7 +111,7 @@ class ProcurementPlanningService:
         products = self._product_inputs(as_of=as_of, currency_code=currency_code)
         forecasts = self._forecast_products(products, as_of=as_of)
         supplier_options = self._supplier_options(as_of=as_of, currency_code=currency_code)
-        lines = self._recommend(
+        all_lines = self._recommend(
             products=products,
             forecasts=forecasts,
             supplier_options=supplier_options,
@@ -119,7 +119,11 @@ class ProcurementPlanningService:
             review_cycle_days=review_cycle_days,
             blocked=not quality["ready"],
         )
-        supplier_orders = self._supplier_orders(lines)
+        supplier_orders = self._supplier_orders(all_lines)
+        summary = self._summary(all_lines, weekly_budget)
+        lines = all_lines[:1000]
+        summary["total_products_evaluated"] = len(all_lines)
+        summary["lines_returned"] = len(lines)
         result = {
             "plan_id": None,
             "as_of_date": as_of,
@@ -128,7 +132,7 @@ class ProcurementPlanningService:
             "review_cycle_days": review_cycle_days,
             "status": "draft" if quality["ready"] else "blocked_data",
             "data_quality": quality,
-            "summary": self._summary(lines, weekly_budget),
+            "summary": summary,
             "supplier_orders": supplier_orders,
             "lines": lines,
             "service_levels": {
@@ -712,7 +716,7 @@ class ProcurementPlanningService:
                 -row["priority_score"],
             )
         )
-        return combined[:1000]
+        return combined
 
     def _supplier_orders(self, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[int, dict[str, Any]] = {}
