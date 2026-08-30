@@ -435,13 +435,56 @@ function PurchaseRecommendations({ data, filters, replenishmentParams, setReplen
   const [planStatus, setPlanStatus] = useState(String(data.status || "draft"));
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const visibleRows = rows.filter((row) => !["covered"].includes(String(row.decision)));
+  const [selectedSupplier, setSelectedSupplier] = useState<string | null>(null);
+  const [includedProducts, setIncludedProducts] = useState<Record<string, boolean>>({});
+  const [quantities, setQuantities] = useState<Record<string, number>>({});
+
+  const supplierKey = (order: Record<string, unknown>) => `${String(order.supplier_key ?? "none")}:${String(order.supplier || "Sin proveedor")}`;
+  const productsFor = (order: Record<string, unknown>) => (order.products || []) as RecommendationRow[];
+  const recommendedProducts = supplierOrders.flatMap(productsFor);
+  const activeOrder = supplierOrders.find((order) => supplierKey(order) === selectedSupplier) || supplierOrders[0];
+  const exceptionGroups = [
+    { key: "reconcile", title: "Reconciliar inventario", count: Number(summary.reconcile_products || 0), rows: rows.filter((row) => String(row.decision) === "reconcile"), help: "Estos productos tienen diferencias de inventario y no se comprarán automáticamente." },
+    { key: "supplier", title: "Proveedor o costo pendiente", count: rows.filter((row) => ["review_supplier", "review_cost"].includes(String(row.decision))).length, rows: rows.filter((row) => ["review_supplier", "review_cost"].includes(String(row.decision))), help: "Requieren completar proveedor o costo antes de sugerir una orden." },
+    { key: "budget", title: "Diferidos por presupuesto", count: Number(summary.deferred_by_budget || 0), rows: rows.filter((row) => String(row.decision) === "deferred_budget"), help: "Tienen necesidad, pero quedaron para la siguiente ventana de compra." },
+    { key: "demand", title: "Sin demanda reciente", count: Number(summary.dead_or_no_demand || 0), rows: [], help: "No se recomienda recomprarlos hasta que vuelva a existir demanda." },
+  ];
 
   useEffect(() => {
+    const nextIncluded: Record<string, boolean> = {};
+    const nextQuantities: Record<string, number> = {};
+    const orders = (data.supplier_orders || []) as Array<Record<string, unknown>>;
+    orders.flatMap((order) => (order.products || []) as RecommendationRow[]).forEach((row) => {
+      const key = String(row.product_key);
+      nextIncluded[key] = true;
+      nextQuantities[key] = Number(row.recommended_quantity || 0);
+    });
     setPlanId(null);
     setPlanStatus(String(data.status || "draft"));
     setActionMessage(null);
+    setIncludedProducts(nextIncluded);
+    setQuantities(nextQuantities);
+    setSelectedSupplier(orders.length ? `${String(orders[0].supplier_key ?? "none")}:${String(orders[0].supplier || "Sin proveedor")}` : null);
   }, [data]);
+
+  function markUnsaved() {
+    if (planId) {
+      setPlanId(null);
+      setPlanStatus("draft");
+    }
+    setActionMessage("Tienes cambios sin guardar.");
+  }
+
+  function setIncluded(productKey: string, included: boolean) {
+    setIncludedProducts((current) => ({ ...current, [productKey]: included }));
+    markUnsaved();
+  }
+
+  function setQuantity(productKey: string, quantity: number) {
+    setQuantities((current) => ({ ...current, [productKey]: Math.max(0, quantity) }));
+    setIncludedProducts((current) => ({ ...current, [productKey]: quantity > 0 }));
+    markUnsaved();
+  }
 
   async function persistPlan() {
     setSaving(true);
@@ -456,9 +499,35 @@ function PurchaseRecommendations({ data, filters, replenishmentParams, setReplen
           review_cycle_days: replenishmentParams.review_cycle_days,
         }),
       });
-      setPlanId(String(created.plan_id));
+      const createdPlanId = String(created.plan_id);
+      const savedPlan = await api<Record<string, unknown>>(`/procurement/plans/${createdPlanId}`);
+      const savedLines = (savedPlan.lines || []) as Array<Record<string, unknown>>;
+      const savedByProduct = new Map(savedLines.map((line) => [String(line.product_key), line]));
+      const adjustments = recommendedProducts.flatMap((product) => {
+        const productKey = String(product.product_key);
+        const savedLine = savedByProduct.get(productKey);
+        if (!savedLine) return [];
+        const included = includedProducts[productKey] !== false && Number(quantities[productKey] || 0) > 0;
+        const quantity = Number(quantities[productKey] ?? product.recommended_quantity ?? 0);
+        const originalQuantity = Number(product.recommended_quantity || 0);
+        if (!included) {
+          return [api(`/procurement/plans/${createdPlanId}/lines/${String(savedLine.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ decision: "discarded", approved_quantity: 0, note: "Excluido manualmente desde el tablero" }),
+          })];
+        }
+        if (quantity !== originalQuantity) {
+          return [api(`/procurement/plans/${createdPlanId}/lines/${String(savedLine.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ decision: "approved", approved_quantity: quantity, note: "Cantidad ajustada desde el tablero" }),
+          })];
+        }
+        return [];
+      });
+      await Promise.all(adjustments);
+      setPlanId(createdPlanId);
       setPlanStatus(String(created.status));
-      setActionMessage(created.status === "blocked_data" ? "El plan quedó guardado, pero no puede aprobarse hasta actualizar sus fuentes." : "Plan semanal guardado. Ya puedes aprobarlo.");
+      setActionMessage(created.status === "blocked_data" ? "El plan quedó guardado, pero no puede aprobarse hasta actualizar sus fuentes." : "Plan guardado con tus productos y cantidades. Ya puedes aprobarlo.");
     } catch (requestError) {
       setActionMessage(requestError instanceof Error ? requestError.message : "No fue posible guardar el plan.");
     } finally {
@@ -498,32 +567,66 @@ function PurchaseRecommendations({ data, filters, replenishmentParams, setReplen
     }
   }
 
+  const orderStats = (order: Record<string, unknown>) => {
+    const selected = productsFor(order).filter((product) => includedProducts[String(product.product_key)] !== false && Number(quantities[String(product.product_key)] || 0) > 0);
+    return {
+      products: selected.length,
+      units: selected.reduce((total, product) => total + Number(quantities[String(product.product_key)] || 0), 0),
+      value: selected.reduce((total, product) => total + Number(quantities[String(product.product_key)] || 0) * Number(product.unit_cost || 0), 0),
+    };
+  };
+
+  const decisionLabel = (decision: unknown) => ({
+    buy_now: "Hacer pedido",
+    ready_for_approval: "Listo para revisar",
+    accumulate_minimum: "Conviene acumular",
+  }[String(decision)] || "Revisar pedido");
+
   return <>
     <div className="section-heading">
-      <div><h2>Reponer</h2><p className="muted">Plan semanal basado en demanda bruta, inventario disponible, mercancía en tránsito, nivel de servicio y desempeño del proveedor.</p></div>
+      <div><h2>Reponer</h2><p className="muted">Abre un proveedor, revisa qué comprar y ajusta las cantidades antes de guardar el pedido.</p></div>
       <div className="purchase-actions">
-        <button className="primary-button compact-button" disabled={saving || !quality.ready} onClick={persistPlan}>Guardar plan</button>
-        <button className="text-button action-button" disabled={saving || !planId || planStatus !== "draft"} onClick={approvePlan}>Aprobar</button>
-        <button className="text-button action-button danger-action" disabled={saving || !planId || planStatus !== "approved"} onClick={submitPlan}>Enviar a Alegra</button>
+        <button className="primary-button compact-button" disabled={saving || !quality.ready || !supplierOrders.length} onClick={persistPlan}>1. Guardar pedido</button>
+        <button className="text-button action-button" disabled={saving || !planId || planStatus !== "draft"} onClick={approvePlan}>2. Aprobar</button>
+        <button className="text-button action-button danger-action" disabled={saving || !planId || planStatus !== "approved"} onClick={submitPlan}>3. Enviar a Alegra</button>
       </div>
     </div>
-    <section className="filters compact-filters">
-      <label>Presupuesto semanal<input type="number" min="0" step="100000" value={replenishmentParams.weekly_budget} onChange={(event) => setReplenishmentParams({ ...replenishmentParams, weekly_budget: Number(event.target.value) || 0 })} /></label>
-      <label>Ciclo de revisión<input type="number" min="1" max="31" value={replenishmentParams.review_cycle_days} onChange={(event) => setReplenishmentParams({ ...replenishmentParams, review_cycle_days: Number(event.target.value) || 7 })} /></label>
+    <details className="advanced-settings"><summary>Configuración avanzada</summary><section className="filters compact-filters">
+      <label>Presupuesto semanal<input type="number" min="0" step="100000" value={replenishmentParams.weekly_budget} onChange={(event) => { setReplenishmentParams({ ...replenishmentParams, weekly_budget: Number(event.target.value) || 0 }); markUnsaved(); }} /></label>
+      <label>Ciclo de revisión<input type="number" min="1" max="31" value={replenishmentParams.review_cycle_days} onChange={(event) => { setReplenishmentParams({ ...replenishmentParams, review_cycle_days: Number(event.target.value) || 7 }); markUnsaved(); }} /></label>
       <label>Fecha del plan<input value={filters.to_date} readOnly /></label>
-    </section>
+    </section></details>
     {!quality.ready && <div className="error"><strong>Plan bloqueado por calidad de datos.</strong>{warnings.map((warning) => <span className="quality-warning" key={warning}>{warning}</span>)}</div>}
-    {quality.ready && <div className="refresh-status">Fuentes listas · inventario {String(quality.snapshot_at || "")} · compras {String(quality.bill_sync_at || "")} · órdenes {String(quality.po_sync_at || "")}</div>}
+    {quality.ready && <div className="refresh-status">Datos actualizados y listos para preparar pedidos.</div>}
     {actionMessage && <div className="warning">{actionMessage}</div>}
-    <section className="cards">
+    <section className="cards replenishment-summary">
       <article className="metric-card"><p>Compra recomendada</p><strong>{money(Number(summary.recommended_value || 0))}</strong><small>de {money(replenishmentParams.weekly_budget)} disponibles</small></article>
-      <article className="metric-card"><p>Productos seleccionados</p><strong>{number(summary.recommended_products)}</strong><small>{number(summary.critical_products)} críticos</small></article>
-      <article className="metric-card"><p>Diferidos por presupuesto</p><strong>{number(summary.deferred_by_budget)}</strong><small>priorizados para la siguiente ventana</small></article>
-      <article className="metric-card"><p>Reconciliar inventario</p><strong>{number(summary.reconcile_products)}</strong><small>no se aprueban automáticamente</small></article>
-      <article className="metric-card"><p>Sin demanda</p><strong>{number(summary.dead_or_no_demand)}</strong><small>evitar recompra y revisar liquidación</small></article>
+      <article className="metric-card"><p>Proveedores con pedido</p><strong>{number(supplierOrders.length)}</strong><small>abre cada uno para ver sus productos</small></article>
+      <article className="metric-card"><p>Productos por comprar</p><strong>{number(summary.recommended_products)}</strong><small>{number(summary.critical_products)} requieren atención prioritaria</small></article>
     </section>
-    <section className="table-card"><h3>Canastas por proveedor</h3>{!supplierOrders.length ? <p className="muted">No hay pedidos aprobables con los datos y presupuesto actuales.</p> : <div className="table-scroll"><table><thead><tr><th>Decisión</th><th>Proveedor</th><th>Productos</th><th>Unidades</th><th>Valor</th><th>Mínimo</th><th>Falta</th><th>Críticos</th></tr></thead><tbody>{supplierOrders.map((order, index) => <tr key={String(order.supplier_key || index)}><td>{String(order.decision)}</td><td>{String(order.supplier || "Sin proveedor")}</td><td>{number(Number(order.lines || 0))}</td><td>{number(Number(order.units || 0))}</td><td>{money(Number(order.estimated_value || 0))}</td><td>{money(Number(order.minimum_order_amount || 0))}</td><td>{money(Number(order.amount_to_minimum || 0))}</td><td>{number(Number(order.critical_lines || 0))}</td></tr>)}</tbody></table></div>}</section>
-    <section className="table-card"><h3>Decisiones por producto</h3><div className="table-scroll"><table className="wide-table"><thead><tr><th>Decisión</th><th>Clase</th><th>Producto</th><th>Proveedor</th><th>Stock</th><th>En tránsito</th><th>Demanda/día</th><th>Cobertura</th><th>Comprar</th><th>Costo</th><th>Valor</th><th>Modelo</th><th>Confianza</th></tr></thead><tbody>{visibleRows.map((row, index) => <tr key={String(row.product_key || index)}><td><strong className={`decision-${String(row.decision)}`}>{String(row.decision)}</strong></td><td><span className="classification-badge">{String(row.abc_class)}{String(row.xyz_class)}</span></td><td>{String(row.name)}<small className="table-subtitle">{String(row.reference || "")} · {String(row.family || "SIN FAMILIA")}</small></td><td>{String(row.supplier || "Por definir")}<small className="table-subtitle">score {number(row.supplier_score)}</small></td><td>{number(row.quantity_on_hand)}</td><td>{number(row.quantity_in_transit)}</td><td>{number(row.daily_forecast)}</td><td>{row.coverage_days == null ? "Sin demanda/agotado" : `${number(row.coverage_days)} días`}</td><td>{number(row.recommended_quantity)}</td><td>{money(Number(row.unit_cost || 0))}</td><td>{money(Number(row.estimated_value || 0))}</td><td>{String(row.forecast_model)}<small className="table-subtitle">WAPE {row.forecast_wape == null ? "n/d" : number(Number(row.forecast_wape) * 100) + "%"}</small></td><td>{String(row.confidence)}<small className="table-subtitle">proveedor {String(row.supplier_confidence || "baja")}</small></td></tr>)}</tbody></table></div></section>
+    <section className="supplier-orders-section"><div className="subsection-heading"><div><h3>Proveedores a los que debes comprar</h3><p className="muted">Selecciona un proveedor para revisar su pedido.</p></div></div>
+      {!supplierOrders.length ? <div className="empty">No hay pedidos sugeridos con los datos y el presupuesto actuales.</div> : <div className="supplier-workspace"><div className="supplier-order-list">{supplierOrders.map((order) => {
+        const key = supplierKey(order);
+        const stats = orderStats(order);
+        return <button type="button" className={`supplier-order-card ${key === supplierKey(activeOrder) ? "active" : ""}`} key={key} onClick={() => setSelectedSupplier(key)}>
+          <span className="supplier-order-top"><strong>{String(order.supplier || "Sin proveedor")}</strong><span className={`order-decision decision-${String(order.decision)}`}>{decisionLabel(order.decision)}</span></span>
+          <span className="supplier-order-value">{money(stats.value)}</span>
+          <span className="supplier-order-metrics"><span>{number(stats.products)} productos</span><span>{number(stats.units)} unidades</span><span>{number(Number(order.critical_lines || 0))} críticos</span></span>
+          {Number(order.amount_to_minimum || 0) > 0 && <span className="minimum-warning">Faltan {money(Number(order.amount_to_minimum))} para completar el mínimo</span>}
+          <span className="view-products">{key === supplierKey(activeOrder) ? "Viendo productos" : "Ver productos"} →</span>
+        </button>;
+      })}</div>
+      {activeOrder && <div className="table-card supplier-products-panel"><div className="subsection-heading"><div><h3>Pedido a {String(activeOrder.supplier || "Sin proveedor")}</h3><p className="muted">Desmarca lo que no quieras comprar o cambia la cantidad sugerida.</p></div><strong>{money(orderStats(activeOrder).value)}</strong></div>
+        <div className="table-scroll"><table className="replenishment-products"><thead><tr><th>Incluir</th><th>Producto</th><th>Disponible</th><th>Cantidad a comprar</th><th>Total</th><th>Por qué</th></tr></thead><tbody>{productsFor(activeOrder).map((row, index) => {
+          const key = String(row.product_key || index);
+          const included = includedProducts[key] !== false;
+          const quantity = Number(quantities[key] ?? row.recommended_quantity ?? 0);
+          return <tr className={!included ? "excluded-product" : ""} key={key}><td><input className="row-checkbox" type="checkbox" checked={included} onChange={(event) => setIncluded(key, event.target.checked)} aria-label={`Incluir ${String(row.name)} en el pedido`} /></td><td><strong>{String(row.name)}</strong><small className="table-subtitle">{String(row.reference || "")} · {String(row.family || "SIN FAMILIA")}</small></td><td>{number(row.quantity_on_hand)}<small className="table-subtitle">{number(row.quantity_in_transit)} en tránsito</small></td><td><input className="quantity-input" type="number" min="0" step="1" value={quantity} onChange={(event) => setQuantity(key, Number(event.target.value) || 0)} aria-label={`Cantidad a comprar de ${String(row.name)}`} /></td><td><strong>{money(included ? quantity * Number(row.unit_cost || 0) : 0)}</strong><small className="table-subtitle">{money(Number(row.unit_cost || 0))} c/u</small></td><td><span className="purchase-reason">{String(row.decision) === "buy_now" ? "Stock urgente" : "Reponer esta semana"}</span><details><summary>Ver análisis</summary><span className="analysis-detail">Clase {String(row.abc_class)}{String(row.xyz_class)} · cobertura {row.coverage_days == null ? "n/d" : `${number(row.coverage_days)} días`} · pronóstico {number(row.daily_forecast)}/día · confianza {String(row.confidence || "n/d")}</span></details></td></tr>;
+        })}</tbody></table></div>
+      </div>}
+      </div>}
+    </section>
+    <section className="exceptions-section"><h3>Productos que requieren revisión</h3><p className="muted">No forman parte de los pedidos anteriores. Ábrelos solo cuando necesites resolver excepciones.</p><div className="exception-grid">{exceptionGroups.map((group) => <details className="exception-card" key={group.key}><summary><span><strong>{group.title}</strong><small>{group.help}</small></span><b>{number(group.count)}</b></summary>{group.rows.length > 0 && <div className="table-scroll"><table><thead><tr><th>Producto</th><th>Stock</th><th>Sugerencia</th></tr></thead><tbody>{group.rows.slice(0, 100).map((row, index) => <tr key={String(row.product_key || index)}><td>{String(row.name)}<small className="table-subtitle">{String(row.reference || "")}</small></td><td>{number(row.quantity_on_hand)}</td><td>{String(row.decision) === "reconcile" ? "Verificar inventario" : String(row.decision) === "deferred_budget" ? "Comprar en la siguiente ventana" : "Completar proveedor o costo"}</td></tr>)}</tbody></table></div>}</details>)}</div></section>
   </>;
 }
 

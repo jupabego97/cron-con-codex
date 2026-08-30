@@ -23,3 +23,51 @@
 .decision-reconcile, .decision-blocked_data { color: #ffb4a2; }
 .decision-no_reorder { color: #9fb3d5; }
 @media (max-width: 700px) { .purchase-actions { width: 100%; justify-content: stretch; } .purchase-actions button { flex: 1; } }
+.advanced-settings { margin: 14px 0; padding: 12px 14px; border: 1px solid #344566; border-radius: 10px; background: #0d1728; font-size: .82rem; }
+.advanced-settings > summary { font-weight: 800; }
+.advanced-settings .filters { margin-top: 12px; }
+.replenishment-summary { grid-template-columns: repeat(3, minmax(220px, 1fr)); }
+.supplier-orders-section, .exceptions-section { margin-top: 28px; }
+.subsection-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.subsection-heading h3 { margin-bottom: 5px; }
+.subsection-heading > strong { color: #78f3d3; font-size: 1.35rem; white-space: nowrap; }
+.supplier-workspace { display: grid; grid-template-columns: minmax(290px, 350px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.supplier-order-list { display: grid; gap: 10px; max-height: 720px; padding-right: 6px; overflow-y: auto; scrollbar-color: #4a608b #101a2d; }
+.supplier-order-card { display: grid; gap: 10px; width: 100%; padding: 18px; border: 1px solid #344566; border-radius: 14px; background: #101a2d; color: #f4f7ff; text-align: left; box-shadow: 0 10px 26px #02050d33; transition: border-color .15s ease, transform .15s ease, background .15s ease; }
+.supplier-order-card:hover { border-color: #5d78a8; transform: translateY(-1px); }
+.supplier-order-card.active { border-color: #78f3d3; background: #14283a; box-shadow: 0 0 0 2px #78f3d322; }
+.supplier-order-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.supplier-order-top > strong { color: #ffffff; font-size: 1.03rem; }
+.order-decision { flex: 0 0 auto; border-radius: 999px; padding: 4px 8px; background: #17243b; font-size: .7rem; font-weight: 900; }
+.supplier-order-value { color: #ffffff; font-size: 1.55rem; font-weight: 900; font-variant-numeric: tabular-nums; }
+.supplier-order-metrics { display: flex; flex-wrap: wrap; gap: 7px; color: #c7d4ea; font-size: .78rem; }
+.supplier-order-metrics span { padding: 4px 7px; border-radius: 6px; background: #17243b; }
+.minimum-warning { color: #ffe0a0; font-size: .76rem; }
+.view-products { color: #78f3d3; font-size: .8rem; font-weight: 900; }
+.supplier-products-panel { position: sticky; top: 12px; max-height: 720px; margin-top: 0; border-color: #486785; overflow: hidden; }
+.supplier-products-panel .table-scroll { max-height: 610px; overflow: auto; }
+.replenishment-products { min-width: 760px; }
+.row-checkbox { width: 20px; height: 20px; min-height: 0; accent-color: #78f3d3; }
+.quantity-input { width: 90px; min-width: 90px; }
+.excluded-product { opacity: .48; }
+.purchase-reason { display: inline-flex; padding: 4px 7px; border-radius: 999px; color: #d9fff5; background: #123f38; font-size: .72rem; font-weight: 800; white-space: nowrap; }
+.analysis-detail { display: block; max-width: 280px; padding: 7px; color: #c7d4ea; line-height: 1.45; }
+.exception-grid { display: grid; gap: 10px; }
+.exception-card { margin: 0; border: 1px solid #344566; border-radius: 11px; background: #101a2d; overflow: hidden; }
+.exception-card > summary { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 15px 17px; list-style: none; color: #f4f7ff; }
+.exception-card > summary::-webkit-details-marker { display: none; }
+.exception-card > summary span { display: grid; gap: 4px; }
+.exception-card > summary small { color: #aebed8; font-weight: 500; }
+.exception-card > summary b { min-width: 46px; padding: 7px 10px; border-radius: 999px; background: #243b66; color: #ffffff; text-align: center; font-size: .9rem; }
+.exception-card[open] > summary { border-bottom: 1px solid #30415f; }
+.exception-card table { margin: 0; }
+@media (max-width: 800px) {
+  .replenishment-summary { grid-template-columns: 1fr; }
+  .supplier-workspace { grid-template-columns: 1fr; }
+  .supplier-order-list { max-height: 420px; }
+  .supplier-products-panel { position: static; max-height: none; }
+  .supplier-products-panel .table-scroll { max-height: none; }
+  .subsection-heading { flex-direction: column; }
+  .purchase-actions { display: grid; grid-template-columns: 1fr; }
+  .exception-card > summary { align-items: flex-start; }
+}
