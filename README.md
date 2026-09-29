@@ -148,7 +148,7 @@ Comandos operativos:
 
 ```powershell
 python -m app.cli backfill-all <tenant-uuid> --resources purchase_order
-python -m app.cli reconcile-procurement <tenant-uuid> --lookback-days 45
+python -m app.cli reconcile-procurement <tenant-uuid>
 python -m app.cli refresh-inventory-analytics <tenant-uuid>
 python -m app.cli configure-webhooks <tenant-slug> https://<dominio-api>
 ```

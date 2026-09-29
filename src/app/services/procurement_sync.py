@@ -24,7 +24,7 @@ class ProcurementReconciliationService:
         self,
         *,
         tenant_id: uuid.UUID,
-        lookback_days: int = 45,
+        lookback_days: int = 60,
         write_batch_size: int = 100,
     ) -> list[SyncRun]:
         if lookback_days < 1:

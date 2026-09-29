@@ -15,7 +15,7 @@ class InvoiceReconciliationService:
         self._session = session
         self._alegra = alegra
 
-    async def reconcile_recent(self, *, tenant_id: uuid.UUID, lookback_days: int = 30) -> SyncRun:
+    async def reconcile_recent(self, *, tenant_id: uuid.UUID, lookback_days: int = 60) -> SyncRun:
         if lookback_days < 1:
             raise ValueError("lookback_days must be positive")
         sync_run = SyncRun(

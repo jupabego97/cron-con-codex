@@ -150,7 +150,7 @@ confirmación adicional y es idempotente.
 En Railway se recomiendan estas ejecuciones:
 
 ```text
-Cada hora: python -m app.cli reconcile-procurement <tenant-uuid> --lookback-days 45
+Cada hora: python -m app.cli sync-invoices <tenant-uuid> --mode reconcile
 Cada 4 horas: python -m app.cli refresh-inventory-analytics <tenant-uuid>
 Una vez: python -m app.cli backfill-all <tenant-uuid> --resources purchase_order
 Una vez o al cambiar el dominio/secreto: python -m app.cli configure-webhooks <tenant-slug> https://<dominio-api>

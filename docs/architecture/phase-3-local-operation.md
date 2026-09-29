@@ -8,7 +8,7 @@ Con el entorno virtual activo y `DATABASE_URL` configurada:
 python -m app.cli migrate
 python -m app.cli create-tenant mi-empresa "Mi Empresa"
 python -m app.cli sync-invoices <tenant-uuid> --mode initial
-python -m app.cli sync-invoices <tenant-uuid> --mode reconcile --lookback-days 30
+python -m app.cli sync-invoices <tenant-uuid> --mode reconcile
 python -m app.cli worker
 ```
 

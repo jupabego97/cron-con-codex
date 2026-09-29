@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync.add_argument("tenant_id", type=uuid.UUID)
     sync.add_argument("--mode", choices=("initial", "reconcile"), default="initial")
-    sync.add_argument("--lookback-days", type=int, default=30)
+    sync.add_argument("--lookback-days", type=int, default=60)
 
     worker = subparsers.add_parser("worker", help="Process the durable webhook queue")
     worker.add_argument("--poll-seconds", type=float, default=5.0)
@@ -120,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refresh recent supplier bills and open purchase orders",
     )
     procurement.add_argument("tenant_id", type=uuid.UUID)
-    procurement.add_argument("--lookback-days", type=int, default=45)
+    procurement.add_argument("--lookback-days", type=int, default=60)
     procurement.add_argument("--write-batch-size", type=int, default=100)
 
     inventory_analytics = subparsers.add_parser(

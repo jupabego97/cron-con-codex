@@ -163,3 +163,16 @@ def test_mart_dimensions_are_loaded_from_operational_tables() -> None:
         "inventory_snapshots",
     ):
         assert table in statements
+
+
+def test_reconciliation_commands_default_to_60_days() -> None:
+    tenant_id = "4da4f10b-1fda-4e5e-91d1-17ef67502049"
+    invoice = build_parser().parse_args(
+        ["sync-invoices", tenant_id, "--mode", "reconcile"]
+    )
+    procurement = build_parser().parse_args(
+        ["reconcile-procurement", tenant_id]
+    )
+
+    assert invoice.lookback_days == 60
+    assert procurement.lookback_days == 60
