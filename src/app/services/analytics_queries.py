@@ -27,6 +27,7 @@ class AnalyticsFilters:
     document_status: str | None = None
     family: str | None = None
     provider_key: int | None = None
+    metric_scope: str = "audit"
 
     @classmethod
     def default(cls) -> "AnalyticsFilters":
@@ -40,6 +41,25 @@ class AnalyticsFilters:
 
 
 class AnalyticsQueryService:
+    def product_sales_page(self, filters: AnalyticsFilters, *, offset: int = 0, limit: int = 50) -> dict:
+        where, params = self._fact_where(filters, alias="f", allow_seller=True, allow_status=True)
+        rows = self._rows(f"""SELECT f.product_key,COALESCE(p.name,'Sin producto') product,
+          p.family_name,f.currency_code,sum(f.quantity) units,sum(f.net_sales_amount) net_sales,
+          sum(f.margin_amount) FILTER(WHERE f.cost_status IN ('costed','estimated')) margin,
+          count(DISTINCT f.document_alegra_id) FILTER(WHERE f.document_type='invoice') invoices,
+          COALESCE(sum(abs(f.net_sales_amount)) FILTER(WHERE f.cost_status IN ('costed','estimated')),0)
+            /NULLIF(sum(abs(f.net_sales_amount)),0)*100 cost_coverage_value_pct,
+          count(*) OVER() total_rows
+          FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key
+          LEFT JOIN dim_product p ON p.tenant_id=f.tenant_id AND p.key=f.product_key
+          WHERE {where} GROUP BY f.product_key,p.name,p.family_name,f.currency_code
+          ORDER BY net_sales DESC,f.product_key NULLS LAST,f.currency_code
+          LIMIT :page_limit OFFSET :page_offset""",
+          {**params, "page_limit": limit, "page_offset": offset})
+        total = rows[0]["total_rows"] if rows else 0
+        return {"items": rows, "pagination": {"offset": offset, "limit": limit,
+                "total": total, "has_more": offset+len(rows)<total}}
+
     def __init__(
         self,
         *,
@@ -201,10 +221,12 @@ class AnalyticsQueryService:
                      COALESCE(sum(f.net_sales_amount), 0) AS net_sales,
                      COALESCE(sum(f.quantity), 0) AS units,
                      count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='invoice') AS invoice_documents,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='credit_note') AS credit_note_documents,
                      COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'invoice'), 0) AS invoice_sales,
                      abs(COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'credit_note'), 0)) AS credit_note_amount,
-                     COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
-                     COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin,
+                     sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS cogs,
+                     sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS gross_margin,
                      COALESCE(sum(f.net_sales_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_sale,
                      COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS costed_sales,
                      count(*) AS total_lines,
@@ -219,7 +241,7 @@ class AnalyticsQueryService:
               GROUP BY {group_by}, {currency}
             )
             SELECT aggregated.*,
-                   COALESCE(gross_margin / NULLIF(costed_sales, 0) * 100, 0) AS gross_margin_pct,
+                   gross_margin / NULLIF(costed_sales, 0) * 100 AS gross_margin_pct,
                    COALESCE(costed_lines::numeric / NULLIF(total_lines, 0) * 100, 0) AS cost_coverage_pct,
                    COALESCE(net_sales / NULLIF(sum(net_sales) OVER (PARTITION BY currency_code), 0) * 100, 0) AS share_pct
             FROM aggregated
@@ -245,10 +267,12 @@ class AnalyticsQueryService:
                      COALESCE(sum(f.net_sales_amount), 0) AS net_sales,
                      COALESCE(sum(f.quantity), 0) AS units,
                      count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='invoice') AS invoice_documents,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='credit_note') AS credit_note_documents,
                      COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'invoice'), 0) AS invoice_sales,
                      abs(COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'credit_note'), 0)) AS credit_note_amount,
-                     COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
-                     COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin,
+                     sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS cogs,
+                     sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS gross_margin,
                      COALESCE(sum(f.net_sales_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_sale,
                      COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS costed_sales,
                      count(*) AS total_lines,
@@ -272,7 +296,7 @@ class AnalyticsQueryService:
                        COALESCE(f.currency_code, 'COP')
             )
             SELECT aggregated.*,
-                   COALESCE(gross_margin / NULLIF(costed_sales, 0) * 100, 0) AS gross_margin_pct,
+                   gross_margin / NULLIF(costed_sales, 0) * 100 AS gross_margin_pct,
                    COALESCE(costed_lines::numeric / NULLIF(total_lines, 0) * 100, 0) AS cost_coverage_pct,
                    COALESCE(net_sales / NULLIF(sum(net_sales) OVER (PARTITION BY currency_code), 0) * 100, 0) AS share_pct
             FROM aggregated
@@ -656,6 +680,8 @@ class AnalyticsQueryService:
             "summary": self._rows(
                 f"""SELECT f.currency_code, count(DISTINCT f.contact_key) AS customers,
                 count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='invoice') AS invoice_documents,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='credit_note') AS credit_note_documents,
                 COALESCE(sum(f.net_sales_amount),0) AS amount
                 FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key
                 WHERE {where} GROUP BY f.currency_code ORDER BY f.currency_code""",
@@ -2062,19 +2088,22 @@ class AnalyticsQueryService:
                    COALESCE(sum(f.net_sales_amount), 0) AS net_sales,
                    COALESCE(sum(f.quantity), 0) AS units,
                    count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
-                   COALESCE(sum(f.quantity) / NULLIF(count(DISTINCT (f.document_type, f.document_alegra_id)), 0), 0) AS units_per_transaction,
-                   COALESCE(sum(f.net_sales_amount) /
-                     NULLIF(count(DISTINCT (f.document_type, f.document_alegra_id)), 0), 0) AS average_ticket,
-                   COALESCE(sum(f.net_sales_amount) / NULLIF(sum(f.quantity), 0), 0) AS average_unit_sale,
-                   COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
-                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin,
-                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) /
-                     NULLIF(sum(f.net_sales_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) * 100, 0) AS gross_margin_pct,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='invoice') AS invoice_documents,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='credit_note') AS credit_note_documents,
+                   sum(f.quantity) / NULLIF(count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='invoice'),0) AS units_per_transaction,
+                   sum(f.net_sales_amount) /
+                     NULLIF(count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='invoice'),0) AS average_ticket,
+                   sum(f.net_sales_amount) / NULLIF(sum(f.quantity), 0) AS average_unit_sale,
+                   sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS cogs,
+                   sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS gross_margin,
+                   sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) / NULLIF(sum(f.net_sales_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) * 100 AS gross_margin_pct,
                    COALESCE(count(*) FILTER (WHERE f.cost_status IN ('costed', 'estimated'))::numeric /
                      NULLIF(count(*), 0) * 100, 0) AS cost_coverage_pct,
                    count(*) FILTER (WHERE f.cost_status = 'partial') AS partial_cost_lines,
                    count(*) FILTER (WHERE f.cost_status = 'unavailable') AS unavailable_cost_lines,
                    COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'invoice'), 0) AS invoice_sales,
+                   COALESCE(sum(abs(f.net_sales_amount)) FILTER (WHERE f.cost_status IN ('costed','estimated')),0)
+                     /NULLIF(sum(abs(f.net_sales_amount)),0)*100 AS cost_coverage_value_pct,
                    abs(COALESCE(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'credit_note'), 0)) AS credit_note_amount,
                    COALESCE(abs(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'credit_note')) /
                      NULLIF(sum(f.net_sales_amount) FILTER (WHERE f.document_type = 'invoice'), 0) * 100, 0) AS credit_note_rate,
@@ -2378,17 +2407,20 @@ class AnalyticsQueryService:
             SELECT f.currency_code, COALESCE(sum(f.net_sales_amount), 0) AS net_sales,
                    COALESCE(sum(f.quantity), 0) AS units,
                    count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
-                   COALESCE(sum(f.net_sales_amount) /
-                     NULLIF(count(DISTINCT (f.document_type, f.document_alegra_id)), 0), 0) AS average_ticket,
-                   COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
-                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin,
-                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) /
-                     NULLIF(sum(f.net_sales_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) * 100, 0) AS gross_margin_pct,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='invoice') AS invoice_documents,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='credit_note') AS credit_note_documents,
+                   sum(f.net_sales_amount) /
+                     NULLIF(count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='invoice'),0) AS average_ticket,
+                   sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS cogs,
+                   sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS gross_margin,
+                   sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) / NULLIF(sum(f.net_sales_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) * 100 AS gross_margin_pct,
                    count(*) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS costed_lines,
                    count(*) FILTER (WHERE f.cost_status = 'partial') AS partial_cost_lines,
                    count(*) FILTER (WHERE f.cost_status = 'unavailable') AS unavailable_cost_lines,
                    COALESCE(count(*) FILTER (WHERE f.cost_status IN ('costed', 'estimated'))::numeric /
-                     NULLIF(count(*), 0) * 100, 0) AS cost_coverage_pct
+                     NULLIF(count(*), 0) * 100, 0) AS cost_coverage_pct,
+                   COALESCE(sum(abs(f.net_sales_amount)) FILTER (WHERE f.cost_status IN ('costed','estimated')),0)
+                     /NULLIF(sum(abs(f.net_sales_amount)),0)*100 AS cost_coverage_value_pct
             FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
             WHERE {where} GROUP BY f.currency_code ORDER BY f.currency_code
             """,
@@ -2407,8 +2439,8 @@ class AnalyticsQueryService:
             f"""
             SELECT {period} AS period, f.currency_code,
                    COALESCE(sum(f.net_sales_amount), 0) AS amount,
-                   COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
-                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin
+                   sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS cogs,
+                   sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS gross_margin
             FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
             WHERE {where} GROUP BY period, f.currency_code ORDER BY period, f.currency_code
             """,
@@ -2567,6 +2599,8 @@ class AnalyticsQueryService:
                    count(*) FILTER (WHERE f.issued_at IS NOT NULL) AS lines_with_time,
                    count(*) FILTER (WHERE f.issued_at IS NULL) AS lines_without_time,
                    count(DISTINCT (f.document_type, f.document_alegra_id)) AS documents,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='invoice') AS invoice_documents,
+                   count(DISTINCT f.document_alegra_id) FILTER (WHERE f.document_type='credit_note') AS credit_note_documents,
                    count(DISTINCT (f.document_type, f.document_alegra_id))
                      FILTER (WHERE f.issued_at IS NOT NULL) AS documents_with_time,
                    count(*) FILTER (
@@ -2619,8 +2653,8 @@ class AnalyticsQueryService:
             SELECT COALESCE({label}, 'Sin dato') AS label, f.currency_code,
                    COALESCE(sum(f.net_sales_amount), 0) AS amount,
                    COALESCE(sum(f.quantity), 0) AS quantity,
-                   COALESCE(sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS cogs,
-                   COALESCE(sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')), 0) AS gross_margin
+                   sum(f.cogs_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS cogs,
+                   sum(f.margin_amount) FILTER (WHERE f.cost_status IN ('costed', 'estimated')) AS gross_margin
             FROM fact_sales_line f JOIN dim_date d ON d.date_key = f.date_key
             {join}
             WHERE {where} GROUP BY label, f.currency_code
@@ -2653,6 +2687,8 @@ class AnalyticsQueryService:
             "from_date": filters.from_date,
             "to_date": filters.to_date,
         }
+        if allow_status and filters.metric_scope == "commercial":
+            clauses.append(f"{alias}.document_status IN ('open','closed')")
         for column, value, allowed in (
             ("currency_code", filters.currency, allow_currency),
             ("product_key", filters.product_key, allow_product),

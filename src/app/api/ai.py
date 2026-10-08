@@ -1,7 +1,8 @@
 """Authenticated conversational analytics assistant."""
 
 from datetime import date
-from typing import Annotated
+from decimal import Decimal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -27,6 +28,9 @@ class AIContextPayload(BaseModel):
     document_status: str | None = Field(default=None, max_length=30)
     family: str | None = Field(default=None, max_length=120)
     provider_key: int | None = Field(default=None, ge=1)
+    metric_scope: Literal["audit", "commercial"] = "audit"
+    weekly_budget: Decimal = Field(default=Decimal("15000000"), ge=0)
+    review_cycle_days: int = Field(default=7, ge=1, le=31)
 
 
 class AIChatPayload(BaseModel):
@@ -48,6 +52,7 @@ def _context_filters(context: AIContextPayload | None) -> AnalyticsFilters:
         document_status=context.document_status,
         family=context.family,
         provider_key=context.provider_key,
+        metric_scope=context.metric_scope,
     )
     if filters.from_date > filters.to_date:
         raise HTTPException(status_code=422, detail="El rango de fechas no es valido")
@@ -61,15 +66,13 @@ def get_ai_status(
     settings = get_settings()
     if settings.ai_provider == "gemini":
         configured = bool(
-            settings.gemini_api_key
-            and settings.gemini_api_key.get_secret_value().strip()
+            settings.gemini_api_key and settings.gemini_api_key.get_secret_value().strip()
         )
         model = settings.gemini_model
         key_name = "GEMINI_API_KEY"
     else:
         configured = bool(
-            settings.openai_api_key
-            and settings.openai_api_key.get_secret_value().strip()
+            settings.openai_api_key and settings.openai_api_key.get_secret_value().strip()
         )
         model = settings.openai_model
         key_name = "OPENAI_API_KEY"
@@ -117,6 +120,8 @@ def chat(
             model=model,
             provider=settings.ai_provider,
             max_tool_rounds=settings.openai_max_tool_rounds,
+            weekly_budget=(payload.context or AIContextPayload()).weekly_budget,
+            review_cycle_days=(payload.context or AIContextPayload()).review_cycle_days,
         )
         return agent.ask(
             message=payload.message.strip(),

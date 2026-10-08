@@ -44,6 +44,11 @@ class SyncRun(Base):
     records_read: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     records_written: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
+    window_from: Mapped[date | None] = mapped_column(Date)
+    window_to: Mapped[date | None] = mapped_column(Date)
+    checkpoint_date: Mapped[date | None] = mapped_column(Date)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
 
 class RawAlegraDocument(Base):
@@ -428,6 +433,7 @@ class InboundEvent(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
     )
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

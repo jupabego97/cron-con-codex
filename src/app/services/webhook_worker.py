@@ -6,7 +6,12 @@ from app.db.models import InboundEvent
 from app.domain.batch_repository import mark_resource_projection_deleted, persist_resource_batch
 from app.integrations.alegra.client import AlegraClient
 from app.integrations.alegra.resources import RESOURCE_BY_KEY
-from app.services.event_queue import claim_next_event, complete_event, retry_or_fail_event
+from app.services.event_queue import (
+    claim_next_event,
+    complete_event,
+    owns_event,
+    retry_or_fail_event,
+)
 
 
 class WebhookWorker:
@@ -19,14 +24,24 @@ class WebhookWorker:
     async def run_once(self) -> bool:
         event = claim_next_event(self._session)
         if event is None:
+            # The polling SELECT opens a transaction even when the queue is empty.
+            # Release its relation lock before sleeping or migrations are blocked.
+            self._session.rollback()
             return False
+        lease_token = event.lease_token
         self._session.commit()
         try:
             await self._process(event)
+            if not owns_event(self._session, event.id, lease_token):
+                self._session.rollback()
+                return True
             complete_event(event)
             self._session.commit()
         except Exception as error:
             self._session.rollback()
+            if not owns_event(self._session, event.id, lease_token):
+                self._session.rollback()
+                return True
             retry_or_fail_event(event, error)
             self._session.commit()
         return True

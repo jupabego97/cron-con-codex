@@ -17,7 +17,24 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.business_time import business_today
-from app.integrations.alegra.client import AlegraClient
+from app.integrations.alegra.client import AlegraAuthenticationError, AlegraClient
+
+
+def _lead_time(supplier: dict) -> int:
+    """An explicit agreement wins; observed means round up; a real zero stays zero."""
+    for key in ("lead_time_days", "observed_lead_days", "default_lead_time_days"):
+        if supplier.get(key) is not None:
+            return max(0, int(Decimal(str(supplier[key])).to_integral_value(rounding=ROUND_CEILING)))
+    return 7
+
+
+def _freight(goods: Decimal, policy: dict) -> Decimal:
+    if goods <= 0:
+        return Decimal(0)
+    threshold = policy.get("free_shipping_threshold")
+    if threshold is not None and goods >= Decimal(str(threshold)):
+        return Decimal(0)
+    return Decimal(str(policy.get("shipping_cost") or 0))
 
 SERVICE_LEVELS = {
     ("A", "X"): Decimal("0.97"),
@@ -54,6 +71,9 @@ class ForecastResult:
     confidence: str
     sale_days: int
     gross_units: Decimal
+    history_days: int = 365
+    observed_days: int = 0
+    censored_stockout_days: int = 0
 
 
 class ProcurementPlanningService:
@@ -68,13 +88,23 @@ class ProcurementPlanningService:
         weekly_budget: Decimal,
         currency_code: str = "COP",
         review_cycle_days: int = 7,
+        decision: str | None = None,
+        offset: int = 0,
+        limit: int = 1000,
+        product_key: int | None = None,
+        family: str | None = None,
+        supplier_key: int | None = None,
     ) -> dict[str, Any]:
         return self._build(
             as_of=as_of,
             weekly_budget=weekly_budget,
             currency_code=currency_code,
             review_cycle_days=review_cycle_days,
+            decision=decision,
+            offset=offset,
+            limit=limit,
             persist=False,
+            product_key=product_key, family=family, supplier_key=supplier_key,
         )
 
     def create_plan(
@@ -85,11 +115,16 @@ class ProcurementPlanningService:
         currency_code: str = "COP",
         review_cycle_days: int = 7,
     ) -> dict[str, Any]:
+        if as_of != business_today():
+            raise ValueError("Purchase plans can only be created for the current business date")
         return self._build(
             as_of=as_of,
             weekly_budget=weekly_budget,
             currency_code=currency_code,
             review_cycle_days=review_cycle_days,
+            decision=None,
+            offset=0,
+            limit=1000,
             persist=True,
         )
 
@@ -100,7 +135,13 @@ class ProcurementPlanningService:
         weekly_budget: Decimal,
         currency_code: str,
         review_cycle_days: int,
+        decision: str | None,
+        offset: int,
+        limit: int,
         persist: bool,
+        product_key: int | None = None,
+        family: str | None = None,
+        supplier_key: int | None = None,
     ) -> dict[str, Any]:
         if weekly_budget < 0:
             raise ValueError("weekly_budget must not be negative")
@@ -108,7 +149,11 @@ class ProcurementPlanningService:
             raise ValueError("review_cycle_days must be between 1 and 31")
         currency_code = currency_code.strip().upper() or "COP"
         quality = self.data_quality(as_of=as_of)
-        products = self._product_inputs(as_of=as_of, currency_code=currency_code)
+        products = self._product_inputs(
+            as_of=as_of,
+            currency_code=currency_code,
+            snapshot_run_id=quality.get("snapshot_run_id"),
+        )
         forecasts = self._forecast_products(products, as_of=as_of)
         supplier_options = self._supplier_options(as_of=as_of, currency_code=currency_code)
         all_lines = self._recommend(
@@ -121,7 +166,16 @@ class ProcurementPlanningService:
         )
         supplier_orders = self._supplier_orders(all_lines)
         summary = self._summary(all_lines, weekly_budget)
-        lines = all_lines[:1000]
+        filtered_lines = (
+            [line for line in all_lines if line["decision"] == decision]
+            if decision
+            else all_lines
+        )
+        filtered_lines = [line for line in filtered_lines
+                          if (product_key is None or line["product_key"] == product_key)
+                          and (family is None or line["family"] == family)
+                          and (supplier_key is None or line["supplier_key"] == supplier_key)]
+        lines = filtered_lines[offset : offset + limit]
         summary["total_products_evaluated"] = len(all_lines)
         summary["lines_returned"] = len(lines)
         result = {
@@ -130,21 +184,38 @@ class ProcurementPlanningService:
             "currency_code": currency_code,
             "weekly_budget": weekly_budget,
             "review_cycle_days": review_cycle_days,
-            "status": "draft" if quality["ready"] else "blocked_data",
+            "status": (
+                "blocked_data"
+                if not quality["ready"]
+                else "draft"
+                if quality["is_current_date"]
+                else "historical_preview"
+            ),
             "data_quality": quality,
             "summary": summary,
-            "supplier_orders": supplier_orders,
+            "supplier_orders": supplier_orders if persist else self._supplier_orders(filtered_lines),
+            "scope": {"budget": "Presupuesto asignado al catálogo completo; filtros limitan la vista",
+                      "as_of_date": as_of, "product_key": product_key, "family": family,
+                      "supplier_key": supplier_key,
+                      "demand": "365 días hasta la fecha de corte, limitado por introducción registrada"},
             "lines": lines,
+            "line_pagination": {
+                "decision": decision,
+                "offset": offset,
+                "limit": limit,
+                "total": len(filtered_lines),
+                "has_more": offset + len(lines) < len(filtered_lines),
+            },
             "service_levels": {
                 f"{abc}{xyz}": value for (abc, xyz), value in SERVICE_LEVELS.items()
             },
         }
         if persist:
-            result["plan_id"] = self._persist_plan(result, forecasts)
+            result["plan_id"] = self._persist_plan(result, forecasts, all_lines)
         return result
 
     def data_quality(self, *, as_of: date | None = None) -> dict[str, Any]:
-        del as_of
+        as_of = as_of or business_today()
         row = (
             self._one(
                 """
@@ -152,6 +223,7 @@ class ProcurementPlanningService:
               SELECT r.id, r.finished_at
               FROM inventory_snapshot_runs r
               WHERE r.tenant_id=:tenant_id AND r.status='succeeded'
+                AND (r.finished_at AT TIME ZONE 'America/Bogota')::date=:as_of
                 AND EXISTS (
                   SELECT 1 FROM fact_inventory_snapshot f
                   WHERE f.tenant_id=r.tenant_id AND f.snapshot_run_id=r.id
@@ -160,16 +232,31 @@ class ProcurementPlanningService:
             ), states AS (
               SELECT
                 max(last_success_at) FILTER (WHERE resource='bill') AS bill_sync_at,
-                max(last_success_at) FILTER (WHERE resource='purchase_order') AS po_sync_at
+                max(last_success_at) FILTER (WHERE resource='purchase_order') AS po_sync_at,
+                max(last_success_at) FILTER (WHERE resource='item') AS item_sync_at,
+                max(last_success_at) FILTER (WHERE resource='contact') AS contact_sync_at
               FROM resource_sync_states WHERE tenant_id=:tenant_id
             )
             SELECT materialized.id AS snapshot_run_id,
                    materialized.finished_at AS snapshot_at,
                    states.bill_sync_at, states.po_sync_at,
+                   states.item_sync_at, states.contact_sync_at,
+                   (SELECT max(finished_at) FROM sync_runs
+                    WHERE tenant_id=:tenant_id AND resource='invoice'
+                      AND status='succeeded') AS invoice_sync_at,
                    (SELECT max(finished_at) FROM mart_refresh_runs
-                    WHERE tenant_id=:tenant_id AND status='succeeded') AS mart_at
+                    WHERE tenant_id=:tenant_id AND status='succeeded') AS mart_at,
+                   (SELECT count(DISTINCT f.document_alegra_id)
+                    FROM fact_purchase_line f
+                    JOIN dim_date d ON d.date_key=f.date_key
+                    LEFT JOIN dim_contact c ON c.tenant_id=f.tenant_id
+                      AND c.key=f.provider_key
+                    WHERE f.tenant_id=:tenant_id AND f.is_deleted=false
+                      AND d.calendar_date BETWEEN :history_from AND :as_of
+                      AND (f.provider_key IS NULL OR c.key IS NULL)) AS unmapped_supplier_documents
             FROM states LEFT JOIN materialized ON true
-            """
+            """,
+                {"as_of": as_of, "history_from": as_of - timedelta(days=364)},
             )
             or {}
         )
@@ -177,31 +264,72 @@ class ProcurementPlanningService:
         snapshot_at = row.get("snapshot_at")
         bill_sync_at = row.get("bill_sync_at")
         po_sync_at = row.get("po_sync_at")
+        item_sync_at = row.get("item_sync_at")
+        contact_sync_at = row.get("contact_sync_at")
+        is_current = as_of == business_today()
         warnings = []
-        if snapshot_at is None or now - snapshot_at > timedelta(hours=6):
+        if snapshot_at is None:
+            warnings.append(f"No hay captura de inventario para {as_of.isoformat()}")
+        elif is_current and now - snapshot_at > timedelta(hours=6):
             warnings.append("Inventario sin una captura materializada en las ultimas 6 horas")
-        if bill_sync_at is None or now - bill_sync_at > timedelta(hours=24):
-            warnings.append("Facturas de proveedor sin reconciliar en las ultimas 24 horas")
-        if po_sync_at is None or now - po_sync_at > timedelta(hours=24):
-            warnings.append("Ordenes de compra sin reconciliar en las ultimas 24 horas")
-        if row.get("mart_at") is None or (snapshot_at is not None and row["mart_at"] < snapshot_at):
-            warnings.append("El mart no contiene la captura de inventario mas reciente")
+        sync_times = [
+            row.get("invoice_sync_at"),
+            bill_sync_at,
+            po_sync_at,
+            item_sync_at,
+            contact_sync_at,
+        ]
+        latest_sync_at = max((stamp for stamp in sync_times if stamp is not None), default=None)
+        if is_current:
+            for field, label in (
+                ("invoice_sync_at", "Facturas de venta"),
+                ("bill_sync_at", "Facturas de proveedor"),
+                ("po_sync_at", "Ordenes de compra"),
+            ):
+                stamp = row.get(field)
+                if stamp is None or now - stamp > timedelta(hours=24):
+                    warnings.append(f"{label} sin sincronizacion exitosa en las ultimas 24 horas")
+        for stamp, label in (
+            (item_sync_at, "Catalogo de productos"),
+            (contact_sync_at, "Catalogo de contactos/proveedores"),
+        ):
+            if stamp is None:
+                warnings.append(f"{label} sin una sincronizacion inicial exitosa")
+        mart_at = row.get("mart_at")
+        if mart_at is None:
+            warnings.append("No hay una ejecucion exitosa del mart")
+        elif latest_sync_at is not None and mart_at < latest_sync_at:
+            warnings.append("El mart es anterior a la ultima sincronizacion de Alegra")
+        elif snapshot_at is not None and mart_at < snapshot_at:
+            warnings.append("El mart no contiene la captura de inventario seleccionada")
+        unmapped = int(row.get("unmapped_supplier_documents") or 0)
+        if unmapped:
+            warnings.append(f"Hay {unmapped} facturas de compra sin proveedor asociado")
         return {
             **row,
+            "as_of_date": as_of,
+            "latest_sync_at": latest_sync_at,
+            "is_current_date": is_current,
             "ready": not warnings,
             "warnings": warnings,
+            "notes": (
+                []
+                if is_current
+                else [
+                    "El tránsito de órdenes abiertas no se reconstruye históricamente y se omite; esta vista no se puede convertir en un pedido."
+                ]
+            ),
             "checked_at": now,
         }
 
-    def _product_inputs(self, *, as_of: date, currency_code: str) -> dict[int, dict[str, Any]]:
+    def _product_inputs(
+        self, *, as_of: date, currency_code: str, snapshot_run_id: uuid.UUID | None
+    ) -> dict[int, dict[str, Any]]:
         rows = self._rows(
             """
             WITH latest AS (
-              SELECT r.id FROM inventory_snapshot_runs r
-              WHERE r.tenant_id=:tenant_id AND r.status='succeeded'
-                AND EXISTS (SELECT 1 FROM fact_inventory_snapshot f
-                            WHERE f.tenant_id=r.tenant_id AND f.snapshot_run_id=r.id)
-              ORDER BY r.finished_at DESC LIMIT 1
+              SELECT CAST(:snapshot_run_id AS uuid) AS id
+              WHERE :snapshot_run_id IS NOT NULL
             ), stock AS (
               SELECT f.product_key, sum(f.quantity_on_hand) AS quantity_on_hand,
                      max(f.unit_cost) FILTER (WHERE f.unit_cost>0) AS snapshot_cost
@@ -211,10 +339,11 @@ class ProcurementPlanningService:
             ), sales AS (
               SELECT f.product_key, d.calendar_date, sum(f.quantity) AS units,
                      sum(f.net_sales_amount) AS revenue,
-                     sum(COALESCE(f.margin_amount,0)) AS margin
+                     sum(f.margin_amount) AS margin
               FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key
               WHERE f.tenant_id=:tenant_id AND f.is_deleted=false
                 AND f.document_type='invoice' AND f.product_key IS NOT NULL
+                AND f.document_status IN ('open','closed')
                 AND d.calendar_date BETWEEN :history_from AND :as_of
                 AND f.currency_code=:currency_code
               GROUP BY f.product_key,d.calendar_date
@@ -227,54 +356,90 @@ class ProcurementPlanningService:
               FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key
               WHERE f.tenant_id=:tenant_id AND f.is_deleted=false
                 AND f.document_type='credit_note' AND f.product_key IS NOT NULL
+                AND f.document_status IN ('open','closed')
                 AND d.calendar_date BETWEEN :history_from AND :as_of
                 AND f.currency_code=:currency_code
               GROUP BY f.product_key
-            ), received AS (
-              SELECT p.product_key,max(d.calendar_date) last_purchase_date,
-                     (array_agg(p.quantity ORDER BY d.calendar_date DESC,
-                                p.document_alegra_id DESC))[1] last_purchase_quantity,
-                     (array_agg(p.unit_cost ORDER BY d.calendar_date DESC,
-                                p.document_alegra_id DESC)
-                      FILTER (WHERE p.unit_cost>0))[1] last_unit_cost
+            ), purchase_documents AS (
+              SELECT p.product_key,p.document_alegra_id,d.calendar_date,
+                     sum(p.quantity) purchase_quantity,
+                     sum(p.unit_cost*p.quantity) FILTER (WHERE p.unit_cost>0)
+                       /NULLIF(sum(p.quantity) FILTER (WHERE p.unit_cost>0),0) weighted_unit_cost,
+                     max(p.provider_key) supplier_key
               FROM fact_purchase_line p JOIN dim_date d ON d.date_key=p.date_key
               WHERE p.tenant_id=:tenant_id AND p.is_deleted=false
-                AND p.product_key IS NOT NULL AND d.calendar_date>=DATE '2025-01-01'
-              GROUP BY p.product_key
+                AND p.document_status IN ('open','closed')
+                AND p.product_key IS NOT NULL AND COALESCE(p.quantity,0)>0
+                AND d.calendar_date BETWEEN DATE '2025-01-01' AND :as_of
+              GROUP BY p.product_key,p.document_alegra_id,d.calendar_date
+            ), received AS (
+              SELECT DISTINCT ON (pd.product_key) pd.product_key,
+                     pd.calendar_date last_purchase_date,
+                     pd.purchase_quantity last_purchase_quantity,
+                     pd.weighted_unit_cost last_unit_cost,
+                     pd.supplier_key last_purchase_supplier_key,
+                     pd.document_alegra_id last_purchase_document_id
+              FROM purchase_documents pd
+              ORDER BY pd.product_key,pd.calendar_date DESC,pd.document_alegra_id DESC
             ), billed_po AS (
               SELECT pb.purchase_order_alegra_id,pbl.item_alegra_id,sum(pbl.quantity) billed
               FROM purchase_bills pb JOIN purchase_bill_lines pbl
                 ON pbl.tenant_id=pb.tenant_id AND pbl.document_alegra_id=pb.alegra_id
               WHERE pb.tenant_id=:tenant_id AND pb.is_deleted=false
+                AND pb.status IN ('open','closed')
                 AND pb.purchase_order_alegra_id IS NOT NULL
+                AND pb.issue_date<=:as_of
               GROUP BY pb.purchase_order_alegra_id,pbl.item_alegra_id
+            ), ordered_products AS (
+              SELECT l.tenant_id,l.document_alegra_id,l.item_alegra_id,sum(l.quantity) ordered,
+                sum(COALESCE(r.accepted,0)) accepted
+              FROM purchase_order_lines l LEFT JOIN (
+                SELECT tenant_id,order_alegra_id,line_number,item_alegra_id,sum(accepted_quantity) accepted
+                FROM purchase_receipts WHERE tenant_id=:tenant_id AND received_on<=:as_of
+                GROUP BY tenant_id,order_alegra_id,line_number,item_alegra_id
+              ) r ON r.tenant_id=l.tenant_id AND r.order_alegra_id=l.document_alegra_id
+                AND r.line_number=l.line_number
+                AND r.item_alegra_id IS NOT DISTINCT FROM l.item_alegra_id
+              WHERE l.tenant_id=:tenant_id GROUP BY l.tenant_id,l.document_alegra_id,l.item_alegra_id
             ), transit AS (
               SELECT dp.key product_key,
-                     sum(GREATEST(COALESCE(pol.quantity,0)-COALESCE(bp.billed,0),0)) in_transit
-              FROM purchase_orders po JOIN purchase_order_lines pol
+                     sum(GREATEST(COALESCE(pol.ordered,0)-GREATEST(COALESCE(bp.billed,0),pol.accepted),0)) in_transit
+              FROM purchase_orders po JOIN ordered_products pol
                 ON pol.tenant_id=po.tenant_id AND pol.document_alegra_id=po.alegra_id
               JOIN dim_product dp ON dp.tenant_id=po.tenant_id
                 AND dp.alegra_id=pol.item_alegra_id
               LEFT JOIN billed_po bp ON bp.purchase_order_alegra_id=po.alegra_id
                 AND bp.item_alegra_id=pol.item_alegra_id
+              LEFT JOIN purchase_order_tracking tracking ON tracking.tenant_id=po.tenant_id
+                AND tracking.order_alegra_id=po.alegra_id
               WHERE po.tenant_id=:tenant_id AND po.is_deleted=false AND po.status='open'
+                AND :include_current_open_po=true AND po.order_date<=:as_of
+                AND COALESCE(tracking.stage,'pending_confirmation') NOT IN ('closed','cancelled')
               GROUP BY dp.key
             )
             SELECT p.key product_key,p.alegra_id,p.name,p.reference,p.family_name,
+                   COALESCE(profile.lifecycle,'active') lifecycle,profile.introduced_on,
+                   profile.replacement_product_key,
                    COALESCE(stock.quantity_on_hand,0) quantity_on_hand,
                    COALESCE(transit.in_transit,0) quantity_in_transit,
                    COALESCE(sales_totals.gross_units,0) gross_units,
                    COALESCE(sales_totals.revenue,0) revenue,
-                   COALESCE(sales_totals.margin,0) margin,
+                   sales_totals.margin margin,
                    COALESCE(sales_totals.sale_days,0) sale_days,
                    COALESCE(returns.returned_units,0) returned_units,
                    received.last_purchase_date,received.last_purchase_quantity,
+                   received.last_purchase_supplier_key,received.last_purchase_document_id,
+                   last_supplier.name last_purchase_supplier,
                    COALESCE(received.last_unit_cost,stock.snapshot_cost,p.current_cost,0) unit_cost
             FROM dim_product p
+            LEFT JOIN product_business_profiles profile ON profile.tenant_id=p.tenant_id
+              AND profile.product_key=p.key
             LEFT JOIN stock ON stock.product_key=p.key
             LEFT JOIN sales_totals ON sales_totals.product_key=p.key
             LEFT JOIN returns ON returns.product_key=p.key
             LEFT JOIN received ON received.product_key=p.key
+            LEFT JOIN dim_contact last_supplier ON last_supplier.tenant_id=p.tenant_id
+              AND last_supplier.key=received.last_purchase_supplier_key
             LEFT JOIN transit ON transit.product_key=p.key
             WHERE p.tenant_id=:tenant_id AND p.is_deleted=false
               AND (stock.product_key IS NOT NULL OR p.inventory_enabled=true)
@@ -283,6 +448,8 @@ class ProcurementPlanningService:
                 "as_of": as_of,
                 "history_from": as_of - timedelta(days=364),
                 "currency_code": currency_code,
+                "snapshot_run_id": snapshot_run_id,
+                "include_current_open_po": as_of == business_today(),
             },
         )
         products = {int(row["product_key"]): row for row in rows}
@@ -292,6 +459,7 @@ class ProcurementPlanningService:
             FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key
             WHERE f.tenant_id=:tenant_id AND f.is_deleted=false
               AND f.document_type='invoice' AND f.product_key IS NOT NULL
+              AND f.document_status IN ('open','closed')
               AND f.currency_code=:currency_code
               AND d.calendar_date BETWEEN :history_from AND :as_of
             GROUP BY f.product_key,d.calendar_date
@@ -308,6 +476,14 @@ class ProcurementPlanningService:
                 product.setdefault("daily", {})[row["calendar_date"]] = Decimal(
                     str(row["units"] or 0)
                 )
+        availability = self._rows("""SELECT p.key product_key,a.observed_on,a.positive_samples
+          FROM product_daily_availability a JOIN dim_product p
+            ON p.tenant_id=a.tenant_id AND p.alegra_id=a.item_alegra_id
+          WHERE a.tenant_id=:tenant_id AND a.observed_on BETWEEN :first AND :as_of""",
+          {"first": as_of-timedelta(days=364), "as_of": as_of})
+        for row in availability:
+            if int(row["product_key"]) in products:
+                products[int(row["product_key"])].setdefault("availability", {})[row["observed_on"]] = row["positive_samples"] > 0
         return products
 
     def _forecast_products(
@@ -330,9 +506,22 @@ class ProcurementPlanningService:
             )
             cumulative += Decimal(str(row.get("revenue") or 0))
 
-        dates = [as_of - timedelta(days=offset) for offset in range(364, -1, -1)]
         results = {}
         for key, product in products.items():
+            first = max(as_of-timedelta(days=364), product.get("introduced_on") or as_of-timedelta(days=364))
+            calendar_dates = [first+timedelta(days=offset) for offset in range((as_of-first).days+1)]
+            observations = product.get("availability", {})
+            observed = sum(day in observations for day in calendar_dates)
+            # Only censor documented zero-stock days when observations cover at least half the window.
+            reliable = observed >= 14 and observed >= len(calendar_dates)/2
+            dates = [day for day in calendar_dates if not reliable or observations.get(day, True)
+                     or product.get("daily", {}).get(day, 0)>0]
+            if not dates:
+                dates = calendar_dates
+            product["forecast_history"] = {"history_days": len(calendar_dates),
+                "observed_days": observed, "censored_stockout_days": len(calendar_dates)-len(dates),
+                "availability_adjusted": reliable,
+                "note": "Días no observados no prueban disponibilidad; ventas perdidas no se inventan"}
             series = [Decimal(str(product.get("daily", {}).get(day, 0))) for day in dates]
             nonzero = [value for value in series if value > 0]
             if not nonzero:
@@ -348,6 +537,8 @@ class ProcurementPlanningService:
                     confidence="baja",
                     sale_days=0,
                     gross_units=Decimal(0),
+                    history_days=len(calendar_dates), observed_days=observed,
+                    censored_stockout_days=len(calendar_dates)-len(dates),
                 )
                 continue
             adi = Decimal(len(series)) / Decimal(len(nonzero))
@@ -371,9 +562,9 @@ class ProcurementPlanningService:
             actual_total = sum(series[-56:], Decimal(0))
             confidence = (
                 "alta"
-                if len(nonzero) >= 20 and selected[1] <= Decimal("0.35")
+                if len(series)>=90 and len(nonzero) >= 20 and selected[1] <= Decimal("0.35")
                 else "media"
-                if len(nonzero) >= 4
+                if len(series) >= 28 and len(nonzero) >= 4 and selected[1] <= Decimal("0.75")
                 else "baja"
             )
             results[key] = ForecastResult(
@@ -388,6 +579,8 @@ class ProcurementPlanningService:
                 confidence=confidence,
                 sale_days=len(nonzero),
                 gross_units=sum(series, Decimal(0)),
+                history_days=len(calendar_dates), observed_days=observed,
+                censored_stockout_days=len(calendar_dates)-len(dates),
             )
         return results
 
@@ -397,7 +590,10 @@ class ProcurementPlanningService:
         errors = Decimal(0)
         signed = Decimal(0)
         actual = Decimal(0)
-        for cutoff in (309, 323, 337, 351):
+        cutoffs = [len(series)-holdout for holdout in (56, 42, 28, 14) if len(series)-holdout>=14]
+        if not cutoffs:
+            return name, Decimal(999), Decimal(0)
+        for cutoff in cutoffs:
             train = series[:cutoff]
             train_dates = dates[:cutoff]
             for position in range(cutoff, min(cutoff + 14, len(series))):
@@ -449,31 +645,75 @@ class ProcurementPlanningService:
     ) -> dict[int, list[dict[str, Any]]]:
         rows = self._rows(
             """
-            WITH po_performance AS (
-              SELECT dp.key product_key,dc.key supplier_key,
-                     count(DISTINCT po.alegra_id) completed_orders,
-                     avg(CASE WHEN pb.issue_date<=po.delivery_date THEN 1.0 ELSE 0.0 END)
-                       FILTER (WHERE pb.issue_date IS NOT NULL AND po.delivery_date IS NOT NULL) on_time_rate,
-                     sum(COALESCE(pbl.quantity,0))/NULLIF(sum(COALESCE(pol.quantity,0)),0) fill_rate,
-                     avg(pb.issue_date-po.order_date)
-                       FILTER (WHERE pb.issue_date IS NOT NULL) observed_lead_days
-              FROM purchase_orders po
-              JOIN purchase_order_lines pol ON pol.tenant_id=po.tenant_id
-                AND pol.document_alegra_id=po.alegra_id
+            WITH supplier_stats_as_of AS (
+              SELECT f.tenant_id,f.product_key,f.provider_key supplier_key,
+                     COALESCE(f.currency_code,'COP') currency_code,
+                     count(*)::integer purchase_line_count,
+                     sum(f.quantity) purchased_units,
+                     sum(f.purchase_amount)/NULLIF(sum(f.quantity),0) average_unit_cost,
+                     (array_agg(f.unit_cost ORDER BY d.calendar_date DESC,
+                                f.document_alegra_id DESC,f.line_number DESC)
+                       FILTER (WHERE f.unit_cost>0))[1] last_unit_cost,
+                     max(d.calendar_date) last_purchase_date
+              FROM fact_purchase_line f JOIN dim_date d ON d.date_key=f.date_key
+              WHERE f.tenant_id=:tenant_id AND f.is_deleted=false
+                AND f.product_key IS NOT NULL AND f.provider_key IS NOT NULL
+                AND COALESCE(f.quantity,0)>0
+                AND d.calendar_date BETWEEN DATE '2025-01-01' AND :as_of
+                AND COALESCE(f.currency_code,'COP')=:currency_code
+              GROUP BY f.tenant_id,f.product_key,f.provider_key,
+                       COALESCE(f.currency_code,'COP')
+            ), ranked_supplier_stats AS (
+              SELECT s.*,
+                     sum(s.purchase_line_count) OVER (
+                       PARTITION BY s.product_key,s.currency_code) total_purchase_lines,
+                     sum(s.purchased_units) OVER (
+                       PARTITION BY s.product_key,s.currency_code) total_purchased_units,
+                     s.purchase_line_count::numeric / NULLIF(sum(s.purchase_line_count) OVER (
+                       PARTITION BY s.product_key,s.currency_code),0) * 100 line_share_pct,
+                     s.purchased_units / NULLIF(sum(s.purchased_units) OVER (
+                       PARTITION BY s.product_key,s.currency_code),0) * 100 unit_share_pct,
+                     row_number() OVER (
+                       PARTITION BY s.product_key,s.currency_code
+                       ORDER BY s.purchase_line_count DESC,s.purchased_units DESC,
+                                s.last_purchase_date DESC,s.supplier_key)::integer frequency_rank
+              FROM supplier_stats_as_of s
+            ), receipt_lines AS (
+              SELECT tenant_id,order_alegra_id,line_number,item_alegra_id,sum(accepted_quantity) accepted,
+                max(received_on) received_on FROM purchase_receipts
+              WHERE tenant_id=:tenant_id AND received_on<=:as_of
+              GROUP BY tenant_id,order_alegra_id,line_number,item_alegra_id
+            ), observed_orders AS (
+              SELECT dp.key product_key,dc.key supplier_key,po.alegra_id,
+                po.order_date,COALESCE(t.expected_on,po.delivery_date) expected_on,
+                sum(pol.quantity) ordered,sum(COALESCE(r.accepted,0)) accepted,
+                max(r.received_on) last_receipt,bool_and(COALESCE(r.accepted,0)>=pol.quantity) complete
+              FROM purchase_orders po JOIN purchase_order_lines pol
+                ON pol.tenant_id=po.tenant_id AND pol.document_alegra_id=po.alegra_id
               JOIN dim_product dp ON dp.tenant_id=po.tenant_id AND dp.alegra_id=pol.item_alegra_id
               JOIN dim_contact dc ON dc.tenant_id=po.tenant_id AND dc.alegra_id=po.provider_alegra_id
-              LEFT JOIN purchase_bills pb ON pb.tenant_id=po.tenant_id
-                AND pb.purchase_order_alegra_id=po.alegra_id AND pb.is_deleted=false
-              LEFT JOIN purchase_bill_lines pbl ON pbl.tenant_id=pb.tenant_id
-                AND pbl.document_alegra_id=pb.alegra_id AND pbl.item_alegra_id=pol.item_alegra_id
-              WHERE po.tenant_id=:tenant_id AND po.is_deleted=false
-              GROUP BY dp.key,dc.key
+              LEFT JOIN receipt_lines r ON r.tenant_id=pol.tenant_id
+                AND r.order_alegra_id=po.alegra_id AND r.line_number=pol.line_number
+                AND r.item_alegra_id IS NOT DISTINCT FROM pol.item_alegra_id
+              LEFT JOIN purchase_order_tracking t ON t.tenant_id=po.tenant_id AND t.order_alegra_id=po.alegra_id
+              WHERE po.tenant_id=:tenant_id AND po.is_deleted=false AND po.status<>'void'
+                AND po.order_date<=:as_of
+              GROUP BY dp.key,dc.key,po.alegra_id,po.order_date,t.expected_on,po.delivery_date
+            ), po_performance AS (
+              SELECT product_key,supplier_key,count(*) FILTER(WHERE complete) completed_orders,
+                avg(CASE WHEN last_receipt<=expected_on THEN 1.0 ELSE 0.0 END)
+                  FILTER(WHERE complete AND expected_on IS NOT NULL) on_time_rate,
+                sum(accepted) FILTER(WHERE last_receipt IS NOT NULL)
+                  /NULLIF(sum(ordered) FILTER(WHERE last_receipt IS NOT NULL),0) fill_rate,
+                avg(last_receipt-order_date) FILTER(WHERE complete) observed_lead_days
+              FROM observed_orders GROUP BY product_key,supplier_key
             ), terms AS (
               SELECT dc.key supplier_key,avg(pb.due_date-pb.issue_date) payment_days
               FROM purchase_bills pb JOIN dim_contact dc
                 ON dc.tenant_id=pb.tenant_id AND dc.alegra_id=pb.provider_alegra_id
               WHERE pb.tenant_id=:tenant_id AND pb.is_deleted=false
                 AND pb.issue_date IS NOT NULL AND pb.due_date IS NOT NULL
+                AND pb.issue_date<=:as_of
               GROUP BY dc.key
             )
             SELECT s.product_key,s.supplier_key,c.name supplier,s.average_unit_cost,
@@ -486,7 +726,8 @@ class ProcurementPlanningService:
                    COALESCE(spp.is_preferred,false) is_preferred,
                    srp.minimum_order_amount,srp.shipping_cost,srp.free_shipping_threshold,
                    srp.default_lead_time_days,srp.max_wait_days
-            FROM supplier_product_stats s JOIN dim_contact c ON c.key=s.supplier_key
+            FROM ranked_supplier_stats s JOIN dim_contact c
+              ON c.tenant_id=s.tenant_id AND c.key=s.supplier_key
             LEFT JOIN po_performance perf ON perf.product_key=s.product_key
               AND perf.supplier_key=s.supplier_key
             LEFT JOIN terms ON terms.supplier_key=s.supplier_key
@@ -498,7 +739,7 @@ class ProcurementPlanningService:
               AND srp.active=true
             WHERE s.tenant_id=:tenant_id AND s.currency_code=:currency_code
             """,
-            {"currency_code": currency_code},
+            {"currency_code": currency_code, "as_of": as_of},
         )
         grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
@@ -519,14 +760,7 @@ class ProcurementPlanningService:
                 on_time = Decimal(
                     str(row["on_time_rate"] if row["on_time_rate"] is not None else "0.5")
                 )
-                lead = Decimal(
-                    str(
-                        row["observed_lead_days"]
-                        or row["lead_time_days"]
-                        or row["default_lead_time_days"]
-                        or 7
-                    )
-                )
+                lead = Decimal(_lead_time(row))
                 lead_score = Decimal(1) / (Decimal(1) + lead / Decimal(30))
                 terms_score = min(Decimal(str(row["payment_days"] or 0)) / Decimal(45), Decimal(1))
                 days_old = (
@@ -578,12 +812,7 @@ class ProcurementPlanningService:
             transit = Decimal(str(product["quantity_in_transit"] or 0))
             options = supplier_options.get(key, [])
             supplier = options[0] if options else {}
-            lead_days = int(
-                supplier.get("observed_lead_days")
-                or supplier.get("lead_time_days")
-                or supplier.get("default_lead_time_days")
-                or 7
-            )
+            lead_days = _lead_time(supplier)
             horizon = lead_days + review_cycle_days
             expected = forecast.daily_forecast * Decimal(horizon)
             safety = Z_VALUES[forecast.service_level] * Decimal(
@@ -605,7 +834,7 @@ class ProcurementPlanningService:
             unit_margin = Decimal(str(product.get("margin") or 0)) / max(
                 Decimal(str(product.get("gross_units") or 0)), Decimal(1)
             )
-            if unit_margin <= 0:
+            if product.get("margin") is None:
                 unit_margin = (
                     Decimal(str(product.get("revenue") or 0))
                     / max(Decimal(str(product.get("gross_units") or 0)), Decimal(1))
@@ -619,7 +848,11 @@ class ProcurementPlanningService:
             priority_score = urgency + forecast.daily_forecast * unit_margin / max(
                 unit_cost, Decimal(1)
             )
-            if stock < 0:
+            if product.get("lifecycle", "active") != "active":
+                decision = "no_reorder"
+                quantity = Decimal(0)
+                value = Decimal(0)
+            elif stock < 0:
                 decision = "reconcile"
             elif forecast.gross_units <= 0 and stock > 0:
                 decision = "no_reorder"
@@ -634,6 +867,8 @@ class ProcurementPlanningService:
                 "product_alegra_id": product["alegra_id"],
                 "name": product["name"],
                 "reference": product.get("reference"),
+                "lifecycle": product.get("lifecycle", "active"),
+                "replacement_product_key": product.get("replacement_product_key"),
                 "family": product.get("family_name") or "SIN FAMILIA",
                 "abc_class": forecast.abc_class,
                 "xyz_class": forecast.xyz_class,
@@ -648,6 +883,9 @@ class ProcurementPlanningService:
                 "returned_units_365d": product.get("returned_units") or 0,
                 "last_purchase_date": product.get("last_purchase_date"),
                 "last_purchase_quantity": product.get("last_purchase_quantity"),
+                "last_purchase_supplier": product.get("last_purchase_supplier"),
+                "last_purchase_document_id": product.get("last_purchase_document_id"),
+                "purchase_lot_reference": product.get("last_purchase_quantity"),
                 "daily_forecast": forecast.daily_forecast,
                 "forecast_horizon_days": horizon,
                 "target_stock": target,
@@ -664,6 +902,7 @@ class ProcurementPlanningService:
                 "minimum_order_quantity": minimum,
                 "pack_size": pack,
                 "minimum_order_amount": supplier.get("minimum_order_amount"),
+                "shipping_cost": supplier.get("shipping_cost"),
                 "free_shipping_threshold": supplier.get("free_shipping_threshold"),
                 "priority_score": priority_score,
                 "priority": "critical"
@@ -678,25 +917,36 @@ class ProcurementPlanningService:
                     key={"baja": 0, "media": 1, "alta": 2}.get,
                 ),
                 "explanation": {
+                    "priority_margin_source": "historical" if product.get("margin") is not None else "ranking_proxy_not_real_margin",
+                    "forecast_history": product.get("forecast_history", {}),
                     "gross_demand_not_net_of_returns": True,
                     "expected_horizon_demand": str(expected),
                     "safety_stock": str(safety),
                     "lead_time_days": lead_days,
                     "review_cycle_days": review_cycle_days,
+                    "last_purchase_date": product.get("last_purchase_date"),
+                    "last_purchase_quantity": product.get("last_purchase_quantity"),
+                    "last_purchase_supplier": product.get("last_purchase_supplier"),
+                    "last_purchase_document_id": product.get("last_purchase_document_id"),
                     "inventory_exception": "negative_stock" if stock < 0 else None,
                 },
             }
             (candidates if decision == "candidate" else opportunities).append(line)
         candidates.sort(key=lambda row: (-row["priority_score"], row["estimated_value"]))
         spent = Decimal(0)
+        supplier_goods = defaultdict(Decimal)
         for line in candidates:
+            previous = supplier_goods[line["supplier_key"]]
+            proposed = previous + line["estimated_value"]
+            increment = line["estimated_value"] + _freight(proposed, line) - _freight(previous, line)
             if blocked:
                 line["decision"] = "blocked_data"
             elif line["supplier_key"] is None:
                 line["decision"] = "review_supplier"
-            elif spent + line["estimated_value"] <= weekly_budget:
+            elif spent + increment <= weekly_budget:
                 line["decision"] = "buy_now" if line["priority"] == "critical" else "buy_weekly"
-                spent += line["estimated_value"]
+                spent += increment
+                supplier_goods[line["supplier_key"]] = proposed
             else:
                 line["decision"] = "deferred_budget"
         combined = candidates + opportunities
@@ -734,6 +984,7 @@ class ProcurementPlanningService:
                     "estimated_value": Decimal(0),
                     "critical_lines": 0,
                     "minimum_order_amount": line.get("minimum_order_amount"),
+                    "shipping_cost": line.get("shipping_cost"),
                     "free_shipping_threshold": line.get("free_shipping_threshold"),
                     "products": [],
                 },
@@ -746,34 +997,46 @@ class ProcurementPlanningService:
         for group in groups.values():
             minimum = Decimal(str(group.get("minimum_order_amount") or 0))
             value = group["estimated_value"]
-            if group["critical_lines"]:
-                group["decision"] = "buy_now"
-            elif minimum and value < minimum:
+            below_minimum = bool(minimum and value < minimum)
+            if below_minimum and group["critical_lines"]:
+                group["decision"] = "urgent_below_minimum"
+            elif below_minimum:
                 group["decision"] = "accumulate_minimum"
             else:
                 group["decision"] = "ready_for_approval"
             group["amount_to_minimum"] = max(minimum - value, Decimal(0))
+            group["shipping_cost_due"] = _freight(value, group)
+            group["estimated_total"] = value + group["shipping_cost_due"]
         return sorted(
             groups.values(), key=lambda row: (-row["critical_lines"], -row["estimated_value"])
         )
 
     def _summary(self, lines: list[dict[str, Any]], weekly_budget: Decimal) -> dict[str, Any]:
         selected = [line for line in lines if line["decision"] in {"buy_now", "buy_weekly"}]
+        goods = sum((line["estimated_value"] for line in selected), Decimal(0))
+        freight = sum((order["shipping_cost_due"] for order in self._supplier_orders(selected)), Decimal(0))
         return {
             "recommended_products": len(selected),
             "critical_products": sum(line["priority"] == "critical" for line in selected),
             "reconcile_products": sum(line["decision"] == "reconcile" for line in lines),
             "deferred_by_budget": sum(line["decision"] == "deferred_budget" for line in lines),
             "dead_or_no_demand": sum(line["decision"] == "no_reorder" for line in lines),
-            "recommended_value": sum((line["estimated_value"] for line in selected), Decimal(0)),
+            "recommended_value": goods + freight,
+            "recommended_goods_value": goods,
+            "estimated_freight": freight,
             "weekly_budget": weekly_budget,
             "remaining_budget": max(
-                weekly_budget - sum((line["estimated_value"] for line in selected), Decimal(0)),
+                weekly_budget - goods - freight,
                 Decimal(0),
             ),
         }
 
-    def _persist_plan(self, result: dict[str, Any], forecasts: dict[int, ForecastResult]) -> str:
+    def _persist_plan(
+        self,
+        result: dict[str, Any],
+        forecasts: dict[int, ForecastResult],
+        all_lines: list[dict[str, Any]],
+    ) -> str:
         plan_id = uuid.uuid4()
         quality = result["data_quality"]
         self._session.execute(
@@ -818,7 +1081,7 @@ class ProcurementPlanningService:
                     ),
                 }
             )
-        for line in result["lines"]:
+        for line in all_lines:
             line_values.append(
                 {
                     "id": uuid.uuid4(),
@@ -879,8 +1142,10 @@ class ProcurementPlanningService:
             raise LookupError("Purchase plan not found")
         lines = self._rows(
             """SELECT l.*,p.alegra_id,p.name,p.reference,p.family_name,c.name supplier
-            FROM purchase_plan_lines l JOIN dim_product p ON p.key=l.product_key
-            LEFT JOIN dim_contact c ON c.key=l.supplier_key
+            FROM purchase_plan_lines l JOIN dim_product p
+              ON p.tenant_id=l.tenant_id AND p.key=l.product_key
+            LEFT JOIN dim_contact c
+              ON c.tenant_id=l.tenant_id AND c.key=l.supplier_key
             WHERE l.plan_id=:plan_id AND l.tenant_id=:tenant_id
             ORDER BY CASE l.decision WHEN 'buy_now' THEN 1 WHEN 'buy_weekly' THEN 2 ELSE 3 END,
                      l.estimated_value DESC""",
@@ -900,12 +1165,65 @@ class ProcurementPlanningService:
         decision: str,
         approved_quantity: Decimal,
         note: str | None,
+        supplier_key: int | None = None,
     ) -> dict[str, Any]:
         if decision not in {"approved", "discarded", "snoozed"}:
             raise ValueError("Invalid line decision")
+        run = self._one(
+            "SELECT status,currency_code FROM purchase_plan_runs "
+            "WHERE id=:plan_id AND tenant_id=:tenant_id FOR UPDATE",
+            {"plan_id": plan_id},
+        )
+        if run is None:
+            raise LookupError("Purchase plan not found")
+        if run["status"] != "draft":
+            raise ValueError("Only draft plans can be edited")
+        line = self._one(
+            "SELECT * FROM purchase_plan_lines WHERE id=:line_id AND plan_id=:plan_id "
+            "AND tenant_id=:tenant_id",
+            {"line_id": line_id, "plan_id": plan_id},
+        )
+        if line is None:
+            raise LookupError("Purchase plan line not found")
+        selected_supplier_key = supplier_key or line.get("supplier_key")
+        if decision == "approved" and approved_quantity > 0 and selected_supplier_key is None:
+            raise ValueError("Choose a supplier before approving a purchase line")
+        unit_cost = Decimal(str(line["unit_cost"]))
+        if selected_supplier_key is not None and decision != "discarded":
+            supplier = self._one(
+                """SELECT s.supplier_key,c.name supplier,
+                  COALESCE(NULLIF(s.last_unit_cost,0),s.average_unit_cost,0) unit_cost,
+                  COALESCE(p.minimum_order_quantity,0) minimum_order_quantity,
+                  COALESCE(p.pack_size,1) pack_size
+                FROM supplier_product_stats s
+                JOIN dim_contact c ON c.tenant_id=s.tenant_id AND c.key=s.supplier_key
+                LEFT JOIN supplier_product_policies p ON p.tenant_id=s.tenant_id
+                  AND p.product_key=s.product_key AND p.supplier_key=s.supplier_key
+                  AND p.currency_code=s.currency_code AND p.active=true
+                WHERE s.tenant_id=:tenant_id AND s.product_key=:product_key
+                  AND s.supplier_key=:supplier_key AND s.currency_code=:currency""",
+                {
+                    "product_key": line["product_key"],
+                    "supplier_key": selected_supplier_key,
+                    "currency": run["currency_code"],
+                },
+            )
+            if supplier is None:
+                raise ValueError("The selected supplier has no purchase history for this product")
+            unit_cost = Decimal(str(supplier["unit_cost"] or 0))
+            minimum = Decimal(str(supplier["minimum_order_quantity"] or 0))
+            pack = Decimal(str(supplier["pack_size"] or 1))
+            if decision == "approved" and approved_quantity > 0:
+                if unit_cost <= 0:
+                    raise ValueError("The selected supplier has no usable unit cost")
+                if minimum and approved_quantity < minimum:
+                    raise ValueError(f"Quantity is below the supplier minimum of {minimum}")
+                if pack > 0 and approved_quantity % pack != 0:
+                    raise ValueError(f"Quantity must be a multiple of the supplier pack size {pack}")
         row = self._one(
             """UPDATE purchase_plan_lines SET decision=:decision,
-            approved_quantity=:quantity,note=:note
+            approved_quantity=:quantity,note=:note,supplier_key=:supplier_key,
+            unit_cost=:unit_cost,estimated_value=:estimated_value
             WHERE id=:line_id AND plan_id=:plan_id AND tenant_id=:tenant_id RETURNING *""",
             {
                 "line_id": line_id,
@@ -913,6 +1231,9 @@ class ProcurementPlanningService:
                 "decision": decision,
                 "quantity": approved_quantity,
                 "note": note,
+                "supplier_key": selected_supplier_key,
+                "unit_cost": unit_cost,
+                "estimated_value": unit_cost * approved_quantity,
             },
         )
         if row is None:
@@ -920,7 +1241,9 @@ class ProcurementPlanningService:
         self._session.commit()
         return row
 
-    def approve_plan(self, plan_id: uuid.UUID) -> dict[str, Any]:
+    def approve_plan(
+        self, plan_id: uuid.UUID, *, allow_below_minimum: bool = False
+    ) -> dict[str, Any]:
         run = self._one(
             "SELECT * FROM purchase_plan_runs WHERE id=:plan_id AND tenant_id=:tenant_id FOR UPDATE",
             {"plan_id": plan_id},
@@ -931,6 +1254,13 @@ class ProcurementPlanningService:
             raise ValueError("The plan is blocked because its source data is stale")
         if run["as_of_date"] != business_today():
             raise ValueError("Only a plan for the current business date can be approved")
+        if run["status"] == "approved":
+            return self.get_plan(plan_id)
+        if run["status"] != "draft":
+            raise ValueError("Only a draft plan can be approved")
+        quality = self.data_quality(as_of=business_today())
+        if not quality["ready"] or quality.get("snapshot_run_id") != run["snapshot_run_id"]:
+            raise ValueError("Source data changed or became stale; prepare a fresh plan")
         self._session.execute(
             text("""UPDATE purchase_plan_lines
           SET decision='approved',approved_quantity=recommended_quantity
@@ -938,28 +1268,103 @@ class ProcurementPlanningService:
             AND decision IN ('buy_now','buy_weekly') AND approved_quantity=0"""),
             {"plan_id": plan_id, "tenant_id": self._tenant_id},
         )
-        total = self._session.execute(
-            text(
-                "SELECT COALESCE(sum(approved_quantity*unit_cost),0) FROM purchase_plan_lines WHERE plan_id=:plan_id AND tenant_id=:tenant_id AND decision='approved'"
-            ),
-            {"plan_id": plan_id, "tenant_id": self._tenant_id},
-        ).scalar_one()
+        approved_lines = self._rows(
+            """SELECT l.supplier_key,c.name supplier,
+              sum(l.approved_quantity*l.unit_cost) goods_value,
+              max(COALESCE(p.minimum_order_amount,0)) minimum_order_amount,
+              max(COALESCE(p.shipping_cost,0)) shipping_cost,
+              max(p.free_shipping_threshold) free_shipping_threshold
+            FROM purchase_plan_lines l
+            LEFT JOIN dim_contact c ON c.tenant_id=l.tenant_id AND c.key=l.supplier_key
+            LEFT JOIN supplier_replenishment_policies p ON p.tenant_id=l.tenant_id
+              AND p.supplier_key=l.supplier_key AND p.currency_code=:currency
+              AND p.active=true
+            WHERE l.plan_id=:plan_id AND l.tenant_id=:tenant_id
+              AND l.decision='approved' AND l.approved_quantity>0
+            GROUP BY l.supplier_key,c.name""",
+            {"plan_id": plan_id, "currency": run["currency_code"]},
+        )
+        missing_supplier = self._one(
+            """SELECT count(*) AS line_count FROM purchase_plan_lines
+            WHERE plan_id=:plan_id AND tenant_id=:tenant_id AND decision='approved'
+              AND approved_quantity>0 AND supplier_key IS NULL""",
+            {"plan_id": plan_id},
+        )
+        if int((missing_supplier or {}).get("line_count") or 0) > 0:
+            self._session.rollback()
+            raise ValueError("Every approved purchase line must have a supplier")
+        if not approved_lines:
+            self._session.rollback()
+            raise ValueError("The plan has no purchase lines to approve")
+        below_minimum = []
+        freight_total = Decimal(0)
+        approval_supplier_audit = []
+        goods_total = Decimal(0)
+        for supplier in approved_lines:
+            goods = Decimal(str(supplier["goods_value"] or 0))
+            goods_total += goods
+            minimum = Decimal(str(supplier["minimum_order_amount"] or 0))
+            free_threshold = supplier["free_shipping_threshold"]
+            if minimum and goods < minimum:
+                below_minimum.append(
+                    f"{supplier['supplier'] or 'Proveedor'}: faltan {minimum - goods}"
+                )
+            freight_due = _freight(goods, supplier)
+            freight_total += freight_due
+            approval_supplier_audit.append(
+                {
+                    "supplier_key": supplier["supplier_key"],
+                    "supplier": supplier["supplier"],
+                    "goods_value": str(goods),
+                    "minimum_order_amount": str(minimum),
+                    "below_minimum": bool(minimum and goods < minimum),
+                    "freight_estimate": str(freight_due),
+                    "free_shipping_threshold": str(free_threshold) if free_threshold is not None else None,
+                }
+            )
+        if below_minimum and not allow_below_minimum:
+            self._session.rollback()
+            raise ValueError(
+                "Some supplier orders are below their minimum. Explicitly confirm the urgent override: "
+                + "; ".join(below_minimum)
+            )
+        total = goods_total + freight_total
         if Decimal(str(total)) > Decimal(str(run["weekly_budget"])):
             self._session.rollback()
-            raise ValueError("Approved value exceeds the weekly budget")
+            raise ValueError("Approved value, including estimated freight, exceeds the weekly budget")
         self._session.execute(
             text(
-                "UPDATE purchase_plan_runs SET status='approved',approved_value=:total,approved_at=now() WHERE id=:plan_id AND tenant_id=:tenant_id"
+                "UPDATE purchase_plan_runs SET status='approved',approved_value=:total,approved_at=now(),approval_audit=CAST(:audit AS jsonb) WHERE id=:plan_id AND tenant_id=:tenant_id"
             ),
-            {"plan_id": plan_id, "tenant_id": self._tenant_id, "total": total},
+            {
+                "plan_id": plan_id,
+                "tenant_id": self._tenant_id,
+                "total": total,
+                "audit": json.dumps(
+                    {
+                        "allow_below_minimum": bool(below_minimum and allow_below_minimum),
+                        "below_minimum_suppliers": below_minimum,
+                        "goods_value": str(goods_total),
+                        "estimated_freight": str(freight_total),
+                        "supplier_orders": approval_supplier_audit,
+                        "approved_at": datetime.now(UTC).isoformat(),
+                    }
+                ),
+            },
         )
         self._session.commit()
         return self.get_plan(plan_id)
 
     async def submit_to_alegra(self, *, plan_id: uuid.UUID, alegra: AlegraClient) -> dict[str, Any]:
-        plan = self.get_plan(plan_id)
-        if plan["status"] not in {"approved", "submitted"}:
+        plan_run = self._one(
+            "SELECT * FROM purchase_plan_runs WHERE id=:plan_id AND tenant_id=:tenant_id FOR UPDATE",
+            {"plan_id": plan_id},
+        )
+        if plan_run is None:
+            raise LookupError("Purchase plan not found")
+        if plan_run["status"] not in {"approved", "submitted"}:
             raise ValueError("The plan must be approved before submission")
+        plan = self.get_plan(plan_id)
         groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for line in plan["lines"]:
             if (
@@ -968,17 +1373,36 @@ class ProcurementPlanningService:
                 and Decimal(str(line["approved_quantity"])) > 0
             ):
                 groups[int(line["supplier_key"])].append(line)
+        if not groups:
+            raise ValueError("The approved plan contains no purchase lines")
         warehouse = self._one(
             "SELECT alegra_id FROM dim_warehouse WHERE tenant_id=:tenant_id AND is_deleted=false ORDER BY key LIMIT 1"
         )
         results = []
-        for supplier_key, lines in groups.items():
+        submission_warnings = []
+        for supplier_key, lines in sorted(groups.items()):
+            existing = self._one(
+                "SELECT * FROM purchase_plan_orders WHERE tenant_id=:tenant_id "
+                "AND plan_id=:plan_id AND supplier_key=:supplier_key",
+                {"plan_id": plan_id, "supplier_key": supplier_key},
+            )
+            if existing is not None:
+                if existing.get("alegra_order_id"):
+                    results.append(existing)
+                    continue
+                if existing["status"] != "rejected":
+                    submission_warnings.append(
+                        f"Order for supplier {supplier_key} is in {existing['status']} state without "
+                        "an Alegra order ID. Check Alegra; automatic resubmission is blocked."
+                    )
+                    results.append(existing)
+                    continue
             supplier = self._one(
                 "SELECT alegra_id,name FROM dim_contact WHERE tenant_id=:tenant_id AND key=:supplier_key",
                 {"supplier_key": supplier_key},
             )
             if supplier is None:
-                continue
+                raise ValueError(f"Supplier {supplier_key} no longer exists in the tenant")
             today = business_today()
             request = {
                 "date": today.isoformat(),
@@ -999,21 +1423,9 @@ class ProcurementPlanningService:
             }
             if request["warehouse"] is None:
                 request.pop("warehouse")
-            request_hash = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
-            existing = self._one(
-                "SELECT * FROM purchase_plan_orders WHERE tenant_id=:tenant_id AND request_hash=:request_hash",
-                {"request_hash": request_hash},
-            )
-            if existing and existing.get("alegra_order_id"):
-                results.append(existing)
-                continue
-            response = await alegra.create_purchase_order(request)
-            order_payload = (
-                response.get("purchaseOrder")
-                if isinstance(response.get("purchaseOrder"), dict)
-                else response
-            )
-            order_id = str(order_payload.get("id")) if order_payload.get("id") is not None else None
+            request_hash = hashlib.sha256(
+                f"procurement-submit-v1:{self._tenant_id}:{plan_id}:{supplier_key}".encode()
+            ).hexdigest()
             value = sum(
                 (
                     Decimal(str(line["approved_quantity"])) * Decimal(str(line["unit_cost"]))
@@ -1021,33 +1433,156 @@ class ProcurementPlanningService:
                 ),
                 Decimal(0),
             )
+            order_payload_json = json.dumps({"state": "submitting", "request": request})
+            if existing is not None:
+                pending = self._one(
+                    """UPDATE purchase_plan_orders SET status='submitting',estimated_value=:value,
+                      request_hash=:hash,response_payload=CAST(:payload AS jsonb)
+                      WHERE id=:order_id AND tenant_id=:tenant_id RETURNING *""",
+                    {
+                        "order_id": existing["id"],
+                        "value": value,
+                        "hash": request_hash,
+                        "payload": order_payload_json,
+                    },
+                )
+            else:
+                pending = self._one(
+                    """INSERT INTO purchase_plan_orders
+                  (id,plan_id,tenant_id,supplier_key,status,estimated_value,request_hash,
+                   response_payload)
+                  VALUES (:id,:plan_id,:tenant_id,:supplier_key,'submitting',:value,:hash,
+                          CAST(:payload AS jsonb)) RETURNING *""",
+                    {
+                        "id": uuid.uuid4(),
+                        "plan_id": plan_id,
+                        "supplier_key": supplier_key,
+                        "value": value,
+                        "hash": request_hash,
+                        "payload": order_payload_json,
+                    },
+                )
+            self._session.commit()
+            try:
+                response = await alegra.create_purchase_order(request)
+            except AlegraAuthenticationError as error:
+                self._session.execute(
+                    text("""UPDATE purchase_plan_orders SET status='rejected',
+                      response_payload=CAST(:payload AS jsonb)
+                      WHERE id=:order_id AND tenant_id=:tenant_id"""),
+                    {
+                        "order_id": pending["id"],
+                        "payload": json.dumps(
+                            {
+                                "state": "rejected",
+                                "request": request,
+                                "error": str(error)[:500],
+                            }
+                        ),
+                    },
+                )
+                self._session.commit()
+                submission_warnings.append(
+                    f"Alegra rejected credentials for supplier {supplier_key}; the order was not accepted. "
+                    "After fixing the API credential, this rejected request can be safely retried."
+                )
+                results.append(
+                    self._one(
+                        "SELECT * FROM purchase_plan_orders WHERE id=:order_id "
+                        "AND tenant_id=:tenant_id",
+                        {"order_id": pending["id"]},
+                    )
+                )
+                continue
+            except Exception as error:
+                self._session.execute(
+                    text("""UPDATE purchase_plan_orders SET status='unknown',
+                      response_payload=CAST(:payload AS jsonb)
+                      WHERE id=:order_id AND tenant_id=:tenant_id"""),
+                    {
+                        "order_id": pending["id"],
+                        "payload": json.dumps(
+                            {
+                                "state": "unknown",
+                                "request": request,
+                                "error": str(error)[:500],
+                            }
+                        ),
+                    },
+                )
+                self._session.commit()
+                submission_warnings.append(
+                    f"Alegra's result is uncertain for supplier {supplier_key}; check Alegra. "
+                    "The request will not be resent automatically."
+                )
+                results.append(
+                    self._one(
+                        "SELECT * FROM purchase_plan_orders WHERE id=:order_id "
+                        "AND tenant_id=:tenant_id",
+                        {"order_id": pending["id"]},
+                    )
+                )
+                continue
+            order_payload = (
+                response.get("purchaseOrder")
+                if isinstance(response.get("purchaseOrder"), dict)
+                else response
+            )
+            order_id = str(order_payload.get("id")) if order_payload.get("id") is not None else None
+            if order_id is None:
+                self._session.execute(
+                    text("""UPDATE purchase_plan_orders SET status='unknown',
+                      response_payload=CAST(:payload AS jsonb)
+                      WHERE id=:order_id AND tenant_id=:tenant_id"""),
+                    {
+                        "order_id": pending["id"],
+                        "payload": json.dumps(
+                            {"state": "unknown", "request": request, "response": response}
+                        ),
+                    },
+                )
+                self._session.commit()
+                submission_warnings.append(
+                    f"Alegra returned no order ID for supplier {supplier_key}; check Alegra. "
+                    "The request will not be resent automatically."
+                )
+                results.append(
+                    self._one(
+                        "SELECT * FROM purchase_plan_orders WHERE id=:order_id "
+                        "AND tenant_id=:tenant_id",
+                        {"order_id": pending["id"]},
+                    )
+                )
+                continue
             row = self._one(
-                """INSERT INTO purchase_plan_orders
-              (id,plan_id,tenant_id,supplier_key,status,estimated_value,request_hash,
-               alegra_order_id,response_payload,submitted_at)
-              VALUES (:id,:plan_id,:tenant_id,:supplier_key,'submitted',:value,:hash,:alegra_id,
-                      CAST(:response AS jsonb),now()) ON CONFLICT (tenant_id,request_hash) DO UPDATE SET
-              status='submitted',alegra_order_id=EXCLUDED.alegra_order_id,
-              response_payload=EXCLUDED.response_payload,submitted_at=now() RETURNING *""",
+                """UPDATE purchase_plan_orders SET status='submitted',alegra_order_id=:alegra_id,
+                   response_payload=CAST(:response AS jsonb),submitted_at=now()
+                   WHERE id=:order_id AND tenant_id=:tenant_id RETURNING *""",
                 {
-                    "id": uuid.uuid4(),
-                    "plan_id": plan_id,
-                    "supplier_key": supplier_key,
-                    "value": value,
-                    "hash": request_hash,
                     "alegra_id": order_id,
                     "response": json.dumps(response),
+                    "order_id": pending["id"],
                 },
             )
             results.append(row)
-        self._session.execute(
-            text(
-                "UPDATE purchase_plan_runs SET status='submitted' WHERE id=:plan_id AND tenant_id=:tenant_id"
-            ),
-            {"plan_id": plan_id, "tenant_id": self._tenant_id},
+            self._session.commit()
+        complete = len(results) == len(groups) and all(
+            result is not None and result.get("alegra_order_id") for result in results
         )
+        if complete:
+            self._session.execute(
+                text(
+                    "UPDATE purchase_plan_runs SET status='submitted' WHERE id=:plan_id AND tenant_id=:tenant_id"
+                ),
+                {"plan_id": plan_id, "tenant_id": self._tenant_id},
+            )
         self._session.commit()
-        return {"plan_id": plan_id, "orders": results}
+        return {
+            "plan_id": plan_id,
+            "orders": results,
+            "complete": complete,
+            "warnings": submission_warnings,
+        }
 
     def supplier_performance(self, supplier_key: int) -> dict[str, Any]:
         supplier = self._one(
@@ -1056,22 +1591,30 @@ class ProcurementPlanningService:
         )
         if supplier is None:
             raise LookupError("Supplier not found")
-        metrics = (
-            self._one(
-                """SELECT count(DISTINCT po.alegra_id) orders,
-          avg(pb.issue_date-po.order_date) FILTER (WHERE pb.issue_date IS NOT NULL) lead_days,
-          avg(CASE WHEN pb.issue_date<=po.delivery_date THEN 1.0 ELSE 0.0 END)
-            FILTER (WHERE pb.issue_date IS NOT NULL AND po.delivery_date IS NOT NULL) on_time_rate,
-          sum(COALESCE(pbl.quantity,0))/NULLIF(sum(COALESCE(pol.quantity,0)),0) fill_rate
-          FROM purchase_orders po JOIN purchase_order_lines pol ON pol.tenant_id=po.tenant_id AND pol.document_alegra_id=po.alegra_id
-          LEFT JOIN purchase_bills pb ON pb.tenant_id=po.tenant_id AND pb.purchase_order_alegra_id=po.alegra_id AND pb.is_deleted=false
-          LEFT JOIN purchase_bill_lines pbl ON pbl.tenant_id=pb.tenant_id AND pbl.document_alegra_id=pb.alegra_id AND pbl.item_alegra_id=pol.item_alegra_id
-          WHERE po.tenant_id=:tenant_id AND po.provider_alegra_id=:supplier_alegra_id AND po.is_deleted=false""",
-                {"supplier_alegra_id": supplier["alegra_id"]},
-            )
-            or {}
-        )
-        return {"supplier": supplier, "metrics": metrics}
+        metrics = self._one("""WITH receipts AS (
+          SELECT tenant_id,order_alegra_id,line_number,item_alegra_id,sum(accepted_quantity) accepted,
+            max(received_on) received_on FROM purchase_receipts WHERE tenant_id=:tenant_id
+          GROUP BY tenant_id,order_alegra_id,line_number,item_alegra_id), orders AS (
+          SELECT po.alegra_id,po.order_date,COALESCE(t.expected_on,po.delivery_date) expected_on,
+            sum(l.quantity) ordered,sum(COALESCE(r.accepted,0)) accepted,
+            max(r.received_on) last_receipt,bool_and(COALESCE(r.accepted,0)>=l.quantity) complete
+          FROM purchase_orders po JOIN purchase_order_lines l
+            ON l.tenant_id=po.tenant_id AND l.document_alegra_id=po.alegra_id
+          LEFT JOIN receipts r ON r.tenant_id=l.tenant_id AND r.order_alegra_id=po.alegra_id AND r.line_number=l.line_number
+            AND r.item_alegra_id IS NOT DISTINCT FROM l.item_alegra_id
+          LEFT JOIN purchase_order_tracking t ON t.tenant_id=po.tenant_id AND t.order_alegra_id=po.alegra_id
+          WHERE po.tenant_id=:tenant_id AND po.provider_alegra_id=:supplier AND po.is_deleted=false AND po.status<>'void'
+          GROUP BY po.alegra_id,po.order_date,t.expected_on,po.delivery_date)
+          SELECT count(*) orders,count(*) FILTER(WHERE complete) completed_orders,
+            count(*) FILTER(WHERE last_receipt IS NOT NULL) observed_orders,
+            avg(last_receipt-order_date) FILTER(WHERE complete) lead_days,
+            avg(CASE WHEN last_receipt<=expected_on THEN 1.0 ELSE 0.0 END)
+              FILTER(WHERE complete AND expected_on IS NOT NULL) on_time_rate,
+            sum(accepted) FILTER(WHERE last_receipt IS NOT NULL)
+              /NULLIF(sum(ordered) FILTER(WHERE last_receipt IS NOT NULL),0) fill_rate FROM orders""",
+          {"supplier": supplier["alegra_id"]}) or {}
+        return {"supplier": supplier, "metrics": metrics,
+                "source": "Recepciones físicas registradas; una factura no prueba entrega"}
 
     def _rows(self, statement: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         values = {"tenant_id": self._tenant_id, **(params or {})}

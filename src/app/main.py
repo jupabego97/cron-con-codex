@@ -2,7 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -11,9 +11,11 @@ from app.api.ai import router as ai_router
 from app.api.analytics import router as analytics_router
 from app.api.dashboard import router as dashboard_router
 from app.api.health import router as health_router
+from app.api.operations import router as operations_router
 from app.api.procurement import router as procurement_router
 from app.api.webhooks import router as webhook_router
 from app.core.config import get_settings
+from app.core.observability import RedactAccessQuery, RequestTimingMiddleware
 
 
 def configure_logging(level: str) -> None:
@@ -21,6 +23,9 @@ def configure_logging(level: str) -> None:
         level=level.upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, RedactAccessQuery) for item in access.filters):
+        access.addFilter(RedactAccessQuery())
 
 
 def create_app() -> FastAPI:
@@ -52,12 +57,14 @@ def create_app() -> FastAPI:
         https_only=settings.app_env == "production",
         max_age=60 * 60 * 24 * 7,
     )
+    app.add_middleware(RequestTimingMiddleware)
     app.include_router(health_router)
     app.include_router(webhook_router)
     app.include_router(dashboard_router)
     app.include_router(analytics_router)
     app.include_router(procurement_router)
     app.include_router(ai_router)
+    app.include_router(operations_router)
     _mount_dashboard(app)
     return app
 
@@ -76,7 +83,8 @@ def _mount_dashboard(app: FastAPI, static_dir: Path | None = None) -> None:
 
     @app.get("/{path:path}", include_in_schema=False)
     def dashboard_spa(path: str) -> FileResponse:
-        del path
+        if path.startswith(("api/", "webhooks/", "healthz/", "readyz/")):
+            raise HTTPException(404, detail="Not found")
         return FileResponse(index_file)
 
 

@@ -36,11 +36,16 @@ class PlanPayload(BaseModel):
 class PlanLinePayload(BaseModel):
     decision: Literal["approved", "discarded", "snoozed"]
     approved_quantity: Decimal = Field(default=Decimal("0"), ge=0)
+    supplier_key: int | None = Field(default=None, gt=0)
     note: str | None = Field(default=None, max_length=2000)
 
 
 class SubmitPlanPayload(BaseModel):
     confirm: Literal[True]
+
+
+class ApprovePlanPayload(BaseModel):
+    allow_below_minimum: bool = False
 
 
 @router.get("/data-quality")
@@ -57,12 +62,35 @@ def preview_plan(
     weekly_budget: Annotated[Decimal, Query(ge=0)] = Decimal("15000000"),
     currency_code: Annotated[str, Query(min_length=3, max_length=10)] = "COP",
     review_cycle_days: Annotated[int, Query(ge=1, le=31)] = 7,
+    decision: Annotated[
+        Literal[
+            "buy_now",
+            "buy_weekly",
+            "reconcile",
+            "review_supplier",
+            "review_cost",
+            "deferred_budget",
+            "blocked_data",
+            "covered",
+            "no_reorder",
+        ] | None,
+        Query(),
+    ] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=5000)] = 1000,
+    product_key: Annotated[int | None, Query(gt=0)] = None,
+    family: Annotated[str | None, Query(max_length=120)] = None,
+    provider_key: Annotated[int | None, Query(gt=0)] = None,
 ) -> dict:
     return service.preview(
         as_of=as_of_date or business_today(),
         weekly_budget=weekly_budget,
         currency_code=currency_code,
         review_cycle_days=review_cycle_days,
+        decision=decision,
+        offset=offset,
+        limit=limit,
+        product_key=product_key, family=family, supplier_key=provider_key,
     )
 
 
@@ -71,12 +99,15 @@ def create_plan(
     payload: PlanPayload,
     service: Annotated[ProcurementPlanningService, Depends(planning_service)],
 ) -> dict:
-    return service.create_plan(
-        as_of=payload.as_of_date,
-        weekly_budget=payload.weekly_budget,
-        currency_code=payload.currency_code,
-        review_cycle_days=payload.review_cycle_days,
-    )
+    try:
+        return service.create_plan(
+            as_of=payload.as_of_date,
+            weekly_budget=payload.weekly_budget,
+            currency_code=payload.currency_code,
+            review_cycle_days=payload.review_cycle_days,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.get("/plans/{plan_id}")
@@ -104,6 +135,7 @@ def update_plan_line(
             decision=payload.decision,
             approved_quantity=payload.approved_quantity,
             note=payload.note,
+            supplier_key=payload.supplier_key,
         )
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -114,10 +146,13 @@ def update_plan_line(
 @router.post("/plans/{plan_id}/approve")
 def approve_plan(
     plan_id: UUID,
+    payload: ApprovePlanPayload,
     service: Annotated[ProcurementPlanningService, Depends(planning_service)],
 ) -> dict:
     try:
-        return service.approve_plan(plan_id)
+        return service.approve_plan(
+            plan_id, allow_below_minimum=payload.allow_below_minimum
+        )
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ValueError as error:

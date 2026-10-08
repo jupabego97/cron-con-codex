@@ -11,6 +11,21 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: retail_test
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: retail_platform_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U retail_test -d retail_platform_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://retail_test:test-only-password@127.0.0.1:5432/retail_platform_test
+      TEST_DATABASE_URL: postgresql+psycopg://retail_test:test-only-password@127.0.0.1:5432/retail_platform_test
+      APP_ENV: test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,7 +36,9 @@ jobs:
       - name: Lint
         run: ruff check .
       - name: Test
-        run: pytest
+        run: |
+          python -m app.cli migrate
+          pytest
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -31,3 +48,8 @@ jobs:
           npm ci
           npm run test
           npm run build
+      - name: Verify browser → API → PostgreSQL
+        working-directory: frontend
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test

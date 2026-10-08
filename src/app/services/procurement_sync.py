@@ -11,6 +11,7 @@ from app.db.models import ResourceSyncState, SyncRun
 from app.domain.batch_repository import persist_resource_batch
 from app.integrations.alegra.client import AlegraClient
 from app.integrations.alegra.resources import RESOURCE_BY_KEY, AlegraResource
+from app.services.sync_checkpoint import LostSyncLease, checkpoint, guard, resume_or_start
 
 
 class ProcurementReconciliationService:
@@ -49,20 +50,21 @@ class ProcurementReconciliationService:
         lookback_days: int,
         write_batch_size: int,
     ) -> SyncRun:
-        run = SyncRun(
+        today = business_today()
+        first_day = today - timedelta(days=lookback_days - 1)
+        run, next_day = resume_or_start(
+            self._session,
             tenant_id=tenant_id,
             resource=resource.key,
-            mode="reconcile",
-            status="running",
+            first=first_day,
+            last=today,
         )
-        self._session.add(run)
-        self._session.commit()
+        lease = run.lease_token
         seen: set[str] = set()
         buffer: list[dict] = []
         try:
-            first_day = business_today() - timedelta(days=lookback_days - 1)
-            for offset in range(lookback_days):
-                current = first_day + timedelta(days=offset)
+            for offset in range((today - next_day).days + 1):
+                current = next_day + timedelta(days=offset)
                 async for payload in self._alegra.iter_all_resource(
                     resource,
                     hydrate_details=True,
@@ -81,9 +83,21 @@ class ProcurementReconciliationService:
                             tenant_id=tenant_id,
                             resource=resource,
                             run=run,
+                            lease=lease,
                             payloads=buffer,
                         )
                         buffer = []
+
+                if buffer:
+                    run.records_written += self._write(
+                        tenant_id=tenant_id,
+                        resource=resource,
+                        run=run,
+                        lease=lease,
+                        payloads=buffer,
+                    )
+                    buffer = []
+                checkpoint(self._session, run, current, lease)
 
             if resource.key == "purchase_order":
                 async for payload in self._alegra.iter_all_resource(
@@ -104,6 +118,7 @@ class ProcurementReconciliationService:
                             tenant_id=tenant_id,
                             resource=resource,
                             run=run,
+                            lease=lease,
                             payloads=buffer,
                         )
                         buffer = []
@@ -112,10 +127,12 @@ class ProcurementReconciliationService:
                     tenant_id=tenant_id,
                     resource=resource,
                     run=run,
+                    lease=lease,
                     payloads=buffer,
                 )
 
             now = datetime.now(UTC)
+            guard(self._session, run, lease)
             run.status = "succeeded"
             run.finished_at = now
             state = self._state(tenant_id, resource.key)
@@ -125,6 +142,11 @@ class ProcurementReconciliationService:
             return run
         except Exception as error:
             self._session.rollback()
+            try:
+                guard(self._session, run, lease)
+            except LostSyncLease:
+                self._session.rollback()
+                raise error from None
             failed = self._session.get(SyncRun, run.id)
             if failed is None:
                 raise
@@ -142,8 +164,10 @@ class ProcurementReconciliationService:
         tenant_id: uuid.UUID,
         resource: AlegraResource,
         run: SyncRun,
+        lease: uuid.UUID,
         payloads: list[dict],
     ) -> int:
+        guard(self._session, run, lease)
         result = persist_resource_batch(
             self._session,
             tenant_id=tenant_id,

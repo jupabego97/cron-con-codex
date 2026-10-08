@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Authenticated, tenant-isolated read API for dashboard data."""
 
 import csv
@@ -29,6 +30,7 @@ def build_filters(
     document_status: Annotated[str | None, Query(max_length=30)] = None,
     family: Annotated[str | None, Query(max_length=120)] = None,
     provider_key: Annotated[int | None, Query(ge=1)] = None,
+    metric_scope: Annotated[Literal["audit", "commercial"], Query()] = "audit",
 ) -> AnalyticsFilters:
     defaults = AnalyticsFilters.default()
     result = AnalyticsFilters(
@@ -41,6 +43,7 @@ def build_filters(
         document_status=document_status,
         family=family,
         provider_key=provider_key,
+        metric_scope=metric_scope,
     )
     if result.from_date > result.to_date:
         raise HTTPException(status_code=422, detail="from_date must not be after to_date")
@@ -62,6 +65,19 @@ def query_service(
 @router.get("/filters")
 def get_filters(service: Annotated[AnalyticsQueryService, Depends(query_service)]) -> dict:
     return service.filters()
+
+
+@router.get("/definitions")
+def metric_definitions(_: Annotated[UUID, Depends(require_dashboard_session)]) -> dict:
+    return {
+        "net_sales": "Facturas menos notas crédito del período, por moneda",
+        "average_ticket": "Venta neta del período / número de facturas; las notas crédito no cuentan como tickets",
+        "gross_margin_pct": "Margen / ventas con costo asignado; no estima el margen de las líneas sin costo",
+        "cost_coverage_value_pct": "Valor absoluto vendido con costo / valor absoluto vendido total",
+        "commercial": "Solo documentos open y closed; excluye borradores, anulados y estados desconocidos",
+        "audit": "Todos los estados no eliminados, para contrastar con Alegra",
+        "inventory": "Stock del último snapshot; el rango de fechas filtra únicamente movimientos",
+    }
 
 
 @router.get("/overview")
@@ -285,10 +301,7 @@ def export_purchase_recommendations(
                 item.get("coverage_days"),
                 item.get("recommended_quantity"),
                 item.get("unit_cost"),
-                (
-                    (item.get("recommended_quantity") or 0)
-                    * (item.get("unit_cost") or 0)
-                ),
+                ((item.get("recommended_quantity") or 0) * (item.get("unit_cost") or 0)),
                 item.get("supplier_confidence_pct"),
                 item.get("last_unit_cost"),
                 item.get("last_purchase_any_date") or item.get("last_purchase_date"),

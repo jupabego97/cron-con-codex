@@ -9,7 +9,6 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-
 revision = "20260728_05"
 down_revision = "20260726_04"
 branch_labels = None

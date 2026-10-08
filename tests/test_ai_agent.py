@@ -27,6 +27,12 @@ def test_ai_tools_are_read_only_functions() -> None:
         "get_business_kpis",
         "get_data_status",
         "get_data_quality",
+        "search_products",
+        "get_product_detail",
+        "get_product_sales_page",
+        "get_cash_projection",
+        "get_receiving_status",
+        "get_service_operations",
     }
     assert all(tool["type"] == "function" for tool in TOOLS)
 
@@ -121,9 +127,7 @@ class _SalesAnalytics(_Analytics):
             "summary": [{"currency_code": "COP", "net_sales": "1000"}],
             "by_hour": [{"hour": 10, "period": "10:00", "currency_code": "COP"}],
             "by_weekday": [{"weekday": "domingo", "amount": "1000", "currency_code": "COP"}],
-            "by_weekday_hour": [
-                {"weekday": "domingo", "period": "10:00", "currency_code": "COP"}
-            ],
+            "by_weekday_hour": [{"weekday": "domingo", "period": "10:00", "currency_code": "COP"}],
             "time_coverage": [{"currency_code": "COP", "documents_with_time": 1}],
         }
 
@@ -294,9 +298,7 @@ def test_specialized_tools_filter_weekday_and_return_margin_changes() -> None:
     )
     filters = AnalyticsFilters(from_date=date(2026, 8, 1), to_date=date(2026, 8, 15))
 
-    hourly = agent._dispatch_tool(
-        "get_sales_by_weekday_hour", {"weekday": "DOMINGO"}, filters
-    )
+    hourly = agent._dispatch_tool("get_sales_by_weekday_hour", {"weekday": "DOMINGO"}, filters)
     margin = agent._dispatch_tool("get_margin_diagnostics", {}, filters)
     quality = agent._dispatch_tool("get_data_quality", {}, filters)
 

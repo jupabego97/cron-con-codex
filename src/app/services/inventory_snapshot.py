@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Capture current stock from Alegra once for every active warehouse."""
 
 import asyncio
@@ -7,7 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -85,8 +86,10 @@ class InventorySnapshotService:
             rows = [row for _, batch in batches for row in batch]
             run.records_read = sum(records_read for records_read, _ in batches)
             if rows:
-                insert = pg_insert(InventorySnapshot).values(rows).on_conflict_do_nothing(
-                    constraint="uq_inventory_snapshot_run_warehouse_item"
+                insert = (
+                    pg_insert(InventorySnapshot)
+                    .values(rows)
+                    .on_conflict_do_nothing(constraint="uq_inventory_snapshot_run_warehouse_item")
                 )
                 self._session.execute(insert)
                 # PostgreSQL may report rowcount=-1 for an INSERT .. ON CONFLICT
@@ -96,6 +99,26 @@ class InventorySnapshotService:
                 run.records_written = 0
             run.status = "succeeded"
             run.finished_at = datetime.now(UTC)
+            self._session.flush()
+            self._session.execute(
+                text("""INSERT INTO product_daily_availability
+              (tenant_id,item_alegra_id,observed_on,sample_count,positive_samples,last_quantity,captured_at)
+              SELECT tenant_id,item_alegra_id,observed_on,count(*),count(*) FILTER(WHERE quantity>0),
+                (array_agg(quantity ORDER BY captured_at DESC))[1],max(captured_at)
+              FROM (SELECT s.tenant_id,s.item_alegra_id,s.snapshot_run_id,
+                  (max(s.captured_at) AT TIME ZONE 'America/Bogota')::date observed_on,
+                  max(s.captured_at) captured_at,sum(s.quantity_on_hand) quantity
+                FROM inventory_snapshots s JOIN inventory_snapshot_runs r
+                  ON r.tenant_id=s.tenant_id AND r.id=s.snapshot_run_id AND r.status='succeeded'
+                WHERE s.tenant_id=:tenant AND (s.captured_at AT TIME ZONE 'America/Bogota')::date
+                  =(:captured AT TIME ZONE 'America/Bogota')::date
+                GROUP BY s.tenant_id,s.item_alegra_id,s.snapshot_run_id) daily
+              GROUP BY tenant_id,item_alegra_id,observed_on
+              ON CONFLICT(tenant_id,item_alegra_id,observed_on) DO UPDATE SET
+                sample_count=excluded.sample_count,positive_samples=excluded.positive_samples,
+                last_quantity=excluded.last_quantity,captured_at=excluded.captured_at"""),
+                {"tenant": tenant_id, "captured": captured_at},
+            )
             self._session.commit()
         except Exception as error:
             self._session.rollback()

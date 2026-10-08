@@ -1,4 +1,12 @@
 :root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #f4f7ff; background: #080d19; font-synthesis: none; }
+:focus-visible { outline: 3px solid #79e5d1; outline-offset: 3px; }
+.operations-form { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 14px; padding: 16px 0; align-items: end; }
+.operation-actions, .saved-views { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 12px 0; }
+.saved-views button { font-size: .8rem; }
+.saved-views span { display: inline-flex; gap: 3px; }
+.filter-scope { grid-column: 1 / -1; font-size: .85rem; line-height: 1.5; }
+.table-scroll { overflow-x: auto; }
+@media (max-width: 600px) { .operations-form { grid-template-columns: 1fr; } .tabs { position: sticky; top: 0; z-index: 5; background: #0b1220; } }
 * { box-sizing: border-box; } body { margin: 0; min-width: 320px; background: radial-gradient(circle at top, #142241 0, #080d19 48rem); } button, input, select { font: inherit; } button { cursor: pointer; }
 .app-shell { max-width: 1440px; margin: auto; padding: 32px; } .topbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 24px; } h1, h2, h3, p { margin-top: 0; } h1 { color: #ffffff; font-size: clamp(1.7rem, 3vw, 2.4rem); margin-bottom: 0; letter-spacing: -.02em; } h2 { color: #ffffff; margin: 28px 0 4px; } h3 { color: #f7f9ff; font-size: 1rem; } .eyebrow { color: #78f3d3; letter-spacing: .14em; font-size: .72rem; font-weight: 800; margin-bottom: 8px; }
 .filters { display: flex; flex-wrap: wrap; gap: 12px; padding: 16px; border: 1px solid #344566; background: #101a2d; box-shadow: 0 12px 32px #02050d55; border-radius: 14px; } .filters label { display: grid; gap: 5px; color: #d3ddf0; font-size: .78rem; font-weight: 600; } input, select { background: #17243b; color: #ffffff; border: 1px solid #4a608b; border-radius: 8px; padding: 8px 10px; min-height: 38px; max-width: 190px; } input:focus, select:focus { border-color: #78f3d3; outline: 2px solid #78f3d344; } .quick-ranges { display: flex; align-items: end; gap: 6px; } .quick-ranges button, .tabs button, .text-button { border: 0; background: transparent; color: #d7e2f8; padding: 9px; border-radius: 7px; font-weight: 600; } .quick-ranges button:hover, .tabs button:hover { background: #253a61; color: #ffffff; }

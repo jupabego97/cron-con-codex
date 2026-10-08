@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Read-only AI copilot over the tenant-scoped analytics mart."""
 
 from __future__ import annotations
@@ -21,7 +22,12 @@ from app.services.analytics_queries import (
     AnalyticsFilters,
     AnalyticsQueryService,
 )
+from app.services.operations_health import OperationsHealthService
 from app.services.procurement_planning import ProcurementPlanningService
+from app.services.product_workspace import ProductWorkspaceService
+from app.services.receiving import ReceivingService
+from app.services.repairs import RepairService
+from app.services.treasury import TreasuryService
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,7 @@ COMMON_FILTER_PROPERTIES: dict[str, Any] = {
     "document_status": {"type": "string", "maxLength": 30},
     "family": {"type": "string", "maxLength": 120},
     "provider_key": {"type": "integer", "minimum": 1},
+    "metric_scope": {"type": "string", "enum": ["audit", "commercial"]},
 }
 
 
@@ -78,6 +85,8 @@ TOOLS: list[dict[str, Any]] = [
             {
                 "weekly_budget": {"type": "number", "minimum": 0},
                 "review_cycle_days": {"type": "integer", "minimum": 1, "maximum": 31},
+                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
             }
         ),
     },
@@ -176,6 +185,60 @@ TOOLS: list[dict[str, Any]] = [
     },
 ]
 
+TOOLS += [
+    {
+        "type": "function",
+        "name": "search_products",
+        "description": "Busca producto por nombre o referencia; devuelve claves para abrir su ficha y paginación.",
+        "parameters": _filter_schema(
+            {
+                "query": {"type": "string", "maxLength": 200},
+                "offset": {"type": "integer", "minimum": 0},
+            }
+        ),
+    },
+    {
+        "type": "function",
+        "name": "get_product_detail",
+        "description": "Ficha de un producto identificado: ventas, documentos, compras, stock y ciclo comercial. Se pagina el historial de ventas.",
+        "parameters": _filter_schema({"offset": {"type": "integer", "minimum": 0}}),
+    },
+    {
+        "type": "function",
+        "name": "get_product_sales_page",
+        "description": "Ranking completo de ventas por producto, paginado; úsalo para profundizar más allá del top mostrado por el dashboard.",
+        "parameters": _filter_schema(
+            {
+                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            }
+        ),
+    },
+    {
+        "type": "function",
+        "name": "get_cash_projection",
+        "description": "Escenarios de caja de las próximas cuatro semanas por moneda; distingue saldo certificado y estimaciones, e incluye advertencias.",
+        "parameters": _filter_schema(),
+    },
+    {
+        "type": "function",
+        "name": "get_receiving_status",
+        "description": "Pedidos actuales y envíos inciertos. No reconstruye tránsito histórico ni modifica Alegra.",
+        "parameters": _filter_schema(
+            {
+                "query": {"type": "string", "maxLength": 200},
+                "offset": {"type": "integer", "minimum": 0},
+            }
+        ),
+    },
+    {
+        "type": "function",
+        "name": "get_service_operations",
+        "description": "Trabajos de reparación, demoras y costos operativos registrados; no duplicar esos ingresos en ventas de Alegra.",
+        "parameters": _filter_schema({"offset": {"type": "integer", "minimum": 0}}),
+    },
+]
+
 
 SYSTEM_INSTRUCTIONS = """
 Eres el copiloto analitico de una empresa colombiana de venta de tecnologia,
@@ -232,6 +295,8 @@ class RetailAIAgent:
         model: str,
         provider: str = "openai",
         max_tool_rounds: int = 4,
+        weekly_budget: Decimal = Decimal("15000000"),
+        review_cycle_days: int = 7,
     ) -> None:
         if not api_key:
             variable = "GEMINI_API_KEY" if provider == "gemini" else "OPENAI_API_KEY"
@@ -245,6 +310,8 @@ class RetailAIAgent:
         self._model = model
         self._provider = provider
         self._max_tool_rounds = max(1, min(max_tool_rounds, 8))
+        self._weekly_budget = weekly_budget
+        self._review_cycle_days = review_cycle_days
 
     def ask(
         self,
@@ -260,7 +327,16 @@ class RetailAIAgent:
         trace: list[dict[str, Any]] = []
         response: Any = None
         analysis_plan = _analysis_plan(message)
+        context = {
+            **_filter_summary(base_filters),
+            "weekly_budget": self._weekly_budget,
+            "review_cycle_days": self._review_cycle_days,
+        }
         request_instructions = SYSTEM_INSTRUCTIONS + "\n\n" + _plan_instruction(analysis_plan)
+        request_instructions += "\nContexto actual del dashboard: " + json.dumps(
+            _json_safe(context)
+        )
+        request_instructions += "\nLos tops no son catálogos completos. Pagina si necesitas exhaustividad; cita rango, moneda, cobertura y fuentes. Caja y recepción son actuales, no históricas. Nunca ejecutes compras ni SQL libre."
 
         try:
             client = self._client()
@@ -313,11 +389,8 @@ class RetailAIAgent:
             "model": self._model,
             "tools_used": trace,
             "analysis_plan": analysis_plan,
-            "context": {
-                "from_date": base_filters.from_date,
-                "to_date": base_filters.to_date,
-                "currency": base_filters.currency,
-            },
+            "context": _json_safe(context),
+            "evidence": trace,
         }
 
     def _client(self) -> Any:
@@ -467,11 +540,19 @@ class RetailAIAgent:
         started = time.perf_counter()
         try:
             output = self._dispatch_tool(name, arguments, base_filters)
-        except (ValueError, TypeError, KeyError) as error:
+        except (ValueError, TypeError, LookupError, ArithmeticError) as error:
             output = {"error": f"No fue posible ejecutar la herramienta: {error}"}
         duration_ms = round((time.perf_counter() - started) * 1000)
         safe_output = _json_safe(output)
-        trace.append({"tool": name, "duration_ms": duration_ms})
+        trace.append(
+            {
+                "tool": name,
+                "duration_ms": duration_ms,
+                "filters": safe_output.get("filters") or _json_safe(_filter_summary(base_filters)),
+                "pagination": safe_output.get("pagination") or safe_output.get("line_pagination"),
+                "coverage": safe_output.get("_coverage"),
+            }
+        )
         self._insert_tool_call(conversation_id, name, arguments, safe_output, duration_ms)
         return safe_output, duration_ms
 
@@ -482,6 +563,48 @@ class RetailAIAgent:
         base_filters: AnalyticsFilters,
     ) -> dict[str, Any]:
         filters = _filters_from_arguments(arguments, base_filters)
+        services = {
+            "get_product_detail": ProductWorkspaceService,
+            "search_products": ProductWorkspaceService,
+            "get_cash_projection": TreasuryService,
+            "get_receiving_status": ReceivingService,
+            "get_service_operations": RepairService,
+        }
+        if name == "get_product_sales_page":
+            return self._analytics.product_sales_page(
+                filters,
+                offset=_bounded_int(arguments, "offset", 0, 0, 1000000),
+                limit=_bounded_int(arguments, "limit", 50, 1, 100),
+            ) | {"filters": _filter_summary(filters)}
+        if name in services:
+            service = services[name](session=self._session, tenant_id=self._tenant_id)
+            offset = _bounded_int(arguments, "offset", 0, 0, 1000000)
+            if name == "search_products":
+                result = service.search(query=str(arguments.get("query", ""))[:200], offset=offset)
+                result["scope"] = "Catálogo actual; no se filtra por fecha de venta"
+            elif name == "get_product_detail":
+                if not filters.product_key:
+                    raise ValueError("Busca e identifica primero el producto")
+                result = service.detail(filters.product_key, filters, offset=offset)
+                result["pagination"] = result.get("document_page")
+            elif name == "get_cash_projection":
+                result = service.projection(filters.currency or "COP")
+                result["scope"] = (
+                    "Caja al día actual y cuatro semanas futuras; no reconstruye un corte histórico"
+                )
+            elif name == "get_receiving_status":
+                result = service.orders(query=str(arguments.get("query", ""))[:200], offset=offset)
+                result["scope"] = "Órdenes actuales; no se restringen por el rango de venta"
+            else:
+                result = service.list(filters, offset=offset)
+            if "items" in result and "total" in result:
+                result["pagination"] = {
+                    "offset": offset,
+                    "limit": 50,
+                    "total": result["total"],
+                    "has_more": offset + len(result["items"]) < result["total"],
+                }
+            return result | {"filters": _filter_summary(filters)}
         if name == "get_inventory_analysis":
             inventory = self._analytics.inventory(filters)
             return {
@@ -496,20 +619,34 @@ class RetailAIAgent:
                 "alerts": self._analytics.alerts(),
             }
         if name == "get_replenishment_plan":
+            budget = Decimal(str(arguments.get("weekly_budget", self._weekly_budget)))
+            if not budget.is_finite() or budget < 0:
+                raise ValueError("El presupuesto debe ser finito y no negativo")
             result = ProcurementPlanningService(
                 session=self._session, tenant_id=self._tenant_id
             ).preview(
                 as_of=filters.to_date,
-                weekly_budget=Decimal(str(arguments.get("weekly_budget", 15000000))),
+                weekly_budget=budget,
                 currency_code=filters.currency or "COP",
-                review_cycle_days=_bounded_int(arguments, "review_cycle_days", 7, 1, 31),
+                review_cycle_days=_bounded_int(
+                    arguments, "review_cycle_days", self._review_cycle_days, 1, 31
+                ),
+                product_key=filters.product_key,
+                family=filters.family,
+                supplier_key=filters.provider_key,
+                offset=_bounded_int(arguments, "offset", 0, 0, 1000000),
+                limit=_bounded_int(arguments, "limit", 80, 1, 100),
             )
             return {
                 "filters": _filter_summary(filters),
                 "data_quality": result.get("data_quality"),
                 "summary": result.get("summary"),
-                "items": result.get("lines", [])[:80],
+                "items": result.get("lines", []),
                 "supplier_orders": result.get("supplier_orders", [])[:80],
+                "line_pagination": result.get("line_pagination"),
+                "scope": result.get("scope"),
+                "budget": result.get("weekly_budget"),
+                "review_cycle_days": result.get("review_cycle_days"),
             }
         if name == "get_sales_analysis":
             result = self._analytics.sales(filters)
@@ -611,6 +748,9 @@ class RetailAIAgent:
             }
         if name == "get_data_status":
             return {
+                "operations": OperationsHealthService(
+                    session=self._session, tenant_id=self._tenant_id
+                ).status(),
                 "mart": self._analytics.refresh_status(),
                 "inventory": self._analytics._one(
                     """
@@ -757,6 +897,8 @@ def _filters_from_arguments(
         return int(value) if value is not None else current
 
     currency = arguments.get("currency", base.currency)
+    if arguments.get("metric_scope", base.metric_scope) not in {"audit", "commercial"}:
+        raise ValueError("Modo de métricas inválido")
     return AnalyticsFilters(
         from_date=from_date,
         to_date=to_date,
@@ -767,6 +909,7 @@ def _filters_from_arguments(
         document_status=arguments.get("document_status", base.document_status),
         family=arguments.get("family", base.family),
         provider_key=optional_int("provider_key", base.provider_key),
+        metric_scope=arguments.get("metric_scope", base.metric_scope),
     )
 
 
@@ -790,6 +933,7 @@ def _filter_summary(filters: AnalyticsFilters) -> dict[str, Any]:
         "document_status": filters.document_status,
         "family": filters.family,
         "provider_key": filters.provider_key,
+        "metric_scope": filters.metric_scope,
     }
 
 
@@ -800,10 +944,17 @@ def _compact_dataset(
     list_limits: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     selected = {key: data.get(key) for key in (keys or tuple(data)) if key in data}
+    coverage = {}
     for key, value in selected.items():
         if isinstance(value, list):
             selected[key] = value[: (list_limits or {}).get(key, 50)]
-    return selected
+            coverage[key] = {
+                "received": len(value),
+                "returned": len(selected[key]),
+                "truncated": len(value) > len(selected[key]),
+                "note": "La consulta de origen puede ser un top limitado; no es todo el catálogo",
+            }
+    return selected | {"_coverage": coverage}
 
 
 def _normalized_text(value: Any) -> str:
@@ -874,6 +1025,14 @@ def _analysis_plan(message: str) -> dict[str, Any]:
             ("get_payments_analysis", "get_data_quality"),
             "La pregunta se refiere a pagos o recaudo.",
         )
+    if any(term in question for term in ("caja", "efectivo", "flujo de dinero", "liquidez")):
+        add(
+            "caja",
+            ("get_cash_projection", "get_data_status"),
+            "Requiere saldo certificado y escenarios, no ventas como caja.",
+        )
+    if any(term in question for term in ("reparacion", "garantia", "servicio tecnico")):
+        add("servicio", ("get_service_operations",), "Requiere registros propios de reparación.")
     if any(term in question for term in ("cliente", "clientes", "recurrencia")):
         add(
             "clientes",

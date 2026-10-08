@@ -1,8 +1,42 @@
+from datetime import UTC, datetime
+
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api import dashboard
 from app.core.config import Settings
 from app.main import create_app
+
+
+@pytest.fixture(autouse=True)
+def isolated_session_factory(monkeypatch):
+    """Authentication unit tests never write to a DATABASE_URL from local .env."""
+    from app.db import session as db_session
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def one(self):
+            return {"attempted_at": datetime.now(UTC), "attempt_count": 0, "locked_until": None}
+
+        def scalar_one_or_none(self):
+            return 0
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def execute(self, *_args, **_kwargs):
+            return Result()
+
+        def commit(self):
+            pass
+
+    monkeypatch.setattr(db_session, "get_session_factory", lambda: Session)
 
 
 def test_dashboard_session_requires_the_configured_password(monkeypatch) -> None:

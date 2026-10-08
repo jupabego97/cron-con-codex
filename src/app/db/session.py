@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings, normalize_database_url
+from app.core.observability import instrument_engine
 
 
 @lru_cache
@@ -12,7 +13,10 @@ def get_engine():
     settings = get_settings()
     if not settings.database_url:
         raise RuntimeError("DATABASE_URL is required for database operations")
-    return create_engine(normalize_database_url(settings.database_url), pool_pre_ping=True)
+    return instrument_engine(
+        create_engine(normalize_database_url(settings.database_url), pool_pre_ping=True,
+                      hide_parameters=True, connect_args={"connect_timeout": 10})
+    )
 
 
 @lru_cache

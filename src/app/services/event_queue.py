@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -55,8 +55,12 @@ def claim_next_event(session: Session) -> InboundEvent | None:
     event = session.scalar(
         select(InboundEvent)
         .where(
-            InboundEvent.status.in_(("pending", "retry_wait")),
-            InboundEvent.available_at <= now,
+            or_(
+                and_(InboundEvent.status.in_(("pending", "retry_wait")),
+                     InboundEvent.available_at <= now),
+                and_(InboundEvent.status == "processing",
+                     InboundEvent.locked_at < now - timedelta(minutes=15)),
+            ),
         )
         .order_by(InboundEvent.available_at, InboundEvent.created_at)
         .with_for_update(skip_locked=True)
@@ -67,7 +71,17 @@ def claim_next_event(session: Session) -> InboundEvent | None:
     event.status = "processing"
     event.attempt_count += 1
     event.locked_at = now
+    event.lease_token = uuid.uuid4()
     return event
+
+
+def owns_event(session: Session, event_id: uuid.UUID, lease_token: uuid.UUID) -> bool:
+    """Fence an expired worker before it commits projections or modifies a new lease."""
+    token = session.scalar(
+        select(InboundEvent.lease_token).where(InboundEvent.id == event_id)
+        .with_for_update()
+    )
+    return token == lease_token
 
 
 def complete_event(event: InboundEvent) -> None:

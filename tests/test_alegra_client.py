@@ -1,8 +1,9 @@
 import asyncio
 
 import httpx
+import pytest
 
-from app.integrations.alegra.client import AlegraClient
+from app.integrations.alegra.client import AlegraClient, AlegraRetryableError
 from app.integrations.alegra.resources import RESOURCE_BY_KEY
 
 
@@ -106,3 +107,25 @@ def test_webhook_subscription_can_be_deleted_with_empty_response() -> None:
         "method": "DELETE",
         "path": "/api/v1/webhooks/subscriptions/subscription-id",
     }
+
+
+def test_purchase_order_post_is_not_retried_after_ambiguous_server_error() -> None:
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(503, json={"detail": "temporarily unavailable"})
+
+    async def create() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            base_url="https://api.alegra.com/api/v1", transport=transport
+        ) as http:
+            alegra = AlegraClient(basic_token="test-token", client=http)
+            with pytest.raises(AlegraRetryableError, match="not retried"):
+                await alegra.create_purchase_order({"provider": "supplier-1"})
+
+    asyncio.run(create())
+
+    assert requests == 1

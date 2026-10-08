@@ -4,8 +4,9 @@ Plataforma propia de inteligencia, analítica y operación para retail tecnológ
 
 ## Estado
 
-Fase 2: facturas, webhooks, cola durable y reconciliación listos como base de código; no ejecuta
-extracciones ni recibe tráfico de producción hasta configurar la infraestructura y los secretos.
+Base operacional, ETL, webhooks, data mart y dashboard monolítico, con módulos de
+reposición, recepción, caja, servicio técnico y estado de datos. Consulta la guía
+de operación para configurar secretos, jobs y migraciones antes del despliegue.
 
 ## Desarrollo local
 
@@ -162,7 +163,26 @@ soportadas para facturas de venta, facturas de compra, contactos e ítems.
 El comando recibe un dominio `https://`; valida el callback con HTTPS y adapta
 el valor al formato sin esquema que exige el endpoint de suscripciones de Alegra.
 
-## Documentación
+## Operación retail y confiabilidad
+
+La nueva capa incorpora **Hoy**, **Productos 360°**, **Pedidos y recepción**,
+**Caja de cuatro semanas**, **Servicio técnico** y **Estado**. El dashboard
+inicia en modo comercial; permite auditoría, conserva vistas/filtros y comparte
+presupuesto y alcance con el asistente. Las recepciones y reparaciones son
+registros propios auditados: no modifican stock ni facturan automáticamente en Alegra.
+
+Aplicar migraciones antes de iniciar la nueva versión del API y refrescar el mart:
+
+```text
+python -m app.cli migrate
+python -m app.cli refresh-mart <tenant-uuid>
+```
+
+No hacen falta nuevas claves ni otro servicio frontend. Consultar
+[operación, despliegue y restauración de respaldos](docs/architecture/phase-9-operational-workspace.md)
+para inicializar los datos propios, conciliar pagos y usar `/readyz`.
+
+## Documentación de las fases
 
 - [Fase 0](docs/architecture/phase-0.md)
 - [ADR 0001](docs/decisions/0001-modular-monolith.md)

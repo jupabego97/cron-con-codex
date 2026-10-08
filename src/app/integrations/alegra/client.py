@@ -330,14 +330,21 @@ class AlegraClient:
         params: dict[str, str | int] | None = None,
         json: dict[str, Any] | None = None,
     ) -> Any:
-        for attempt in range(1, self._max_retries + 1):
+        can_retry = method.upper() == "GET"
+        max_attempts = self._max_retries if can_retry else 1
+        for attempt in range(1, max_attempts + 1):
             await self._wait_for_rate_slot()
             try:
                 response = await self._client.request(
                     method, path, params=params or {}, json=json, headers=self._headers
                 )
             except httpx.RequestError as error:
-                if attempt == self._max_retries:
+                if not can_retry:
+                    raise AlegraRetryableError(
+                        f"{method.upper()} request to Alegra failed; its outcome may be uncertain, "
+                        "so it was not retried"
+                    ) from error
+                if attempt == max_attempts:
                     raise AlegraRetryableError(
                         "Network request to Alegra failed after retries"
                     ) from error
@@ -347,12 +354,22 @@ class AlegraClient:
             if response.status_code in (401, 403):
                 raise AlegraAuthenticationError("Alegra rejected the configured credential")
             if response.status_code == 429:
-                if attempt == self._max_retries:
+                if not can_retry:
+                    raise AlegraRetryableError(
+                        f"Alegra rate-limited {method.upper()}; request was not retried because "
+                        "the operation may not be idempotent"
+                    )
+                if attempt == max_attempts:
                     raise AlegraRetryableError("Alegra rate limit persisted after retries")
                 await asyncio.sleep(_rate_limit_delay(response))
                 continue
             if 500 <= response.status_code <= 599:
-                if attempt == self._max_retries:
+                if not can_retry:
+                    raise AlegraRetryableError(
+                        f"Alegra returned HTTP {response.status_code} for {method.upper()}; "
+                        "the request was not retried because its outcome may be uncertain"
+                    )
+                if attempt == max_attempts:
                     raise AlegraRetryableError(
                         f"Alegra returned HTTP {response.status_code} after retries"
                     )
