@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -15,13 +16,17 @@ def test_liveness_endpoint() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_readiness_endpoint(monkeypatch) -> None:
+@pytest.mark.parametrize("revision,expected_status", [
+    ("20261008_20", 200), ("20261008_21", 200),
+    ("20261006_19", 503), ("unknown", 503),
+])
+def test_readiness_endpoint(monkeypatch, revision, expected_status) -> None:
     class Connection:
         def execute(self, *_args):
             return self
 
         def scalar(self):
-            return "20261008_20"
+            return revision
 
     class Engine:
         @contextmanager
@@ -32,8 +37,9 @@ def test_readiness_endpoint(monkeypatch) -> None:
     with TestClient(create_app()) as client:
         response = client.get("/readyz")
 
-    assert response.status_code == 200
-    assert response.json() == {"status": "ready"}
+    assert response.status_code == expected_status
+    if expected_status == 200:
+        assert response.json() == {"status": "ready"}
 
 
 def test_readiness_failure_does_not_expose_credentials(monkeypatch) -> None:
