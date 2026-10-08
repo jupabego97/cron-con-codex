@@ -391,6 +391,8 @@ class HistoricalSalesCostService:
         )
 
     def _load_layers(self, *, tenant_id: uuid.UUID) -> dict[int, list[_CostLayer]]:
+        # Rebuilt movement UUIDs and ingestion timestamps are not FIFO tie-breakers.
+        # Without a receipt time, source document/line provide a stable daily order.
         rows = self._session.execute(
             text(
                 """
@@ -400,7 +402,10 @@ class HistoricalSalesCostService:
                 FROM inventory_cost_layers l
                 JOIN inventory_cost_movements m ON m.id=l.movement_id
                 WHERE l.tenant_id=:tenant_id AND l.remaining_quantity>0
-                ORDER BY l.product_key, l.opened_on, m.created_at, m.id
+                ORDER BY l.product_key, l.opened_on,
+                         CASE WHEN m.source_type='inventory_cost_opening' THEN 0 ELSE 1 END,
+                         m.source_type, m.source_id, m.source_line_number,
+                         l.warehouse_key
                 """
             ),
             {"tenant_id": tenant_id},

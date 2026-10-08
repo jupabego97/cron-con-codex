@@ -61,6 +61,22 @@ por FIFO, actualiza `fact_sales_line` y guarda el detalle de asignación en
 `sales_cost_allocations`. Las notas crédito reciben un costo estimado a partir
 del costo FIFO disponible y quedan identificadas como `estimated`.
 
+El orden del FIFO es estable: fecha de la capa, saldo inicial antes de compras
+del mismo día y, para desempatar, tipo de fuente, identificador del documento y
+número de línea (bodega como último desempate). El identificador del documento
+se ordena como texto; no se interpreta como una hora de recepción. Cuando la
+fuente solo aporta fecha, este es un desempate técnico reproducible, no una
+afirmación de la secuencia real de compras dentro del día. No se usan los UUID
+regenerados ni la fecha de inserción del ledger. Dos ejecuciones con las mismas
+fuentes producen los mismos costos, márgenes y asignaciones por línea aunque
+los identificadores técnicos y de ejecución cambien.
+
+Al aplicar esta corrección a un ledger anterior, los costos de compras que
+empataban en fecha pueden ajustarse una vez. No se modifican los precios
+certificados del saldo inicial, las cantidades o importes de las ventas, ni las
+existencias capturadas de Alegra. Una modificación posterior de la fuente sí
+debe reflejarse en el siguiente cálculo.
+
 El dashboard usa `cogs_amount`, `unit_cost`, `margin_amount`, `cost_status`,
 `cost_confidence` y `cost_method`. Una línea puede quedar `partial` o
 `unavailable` si la cantidad vendida supera las capas conocidas; el sistema no
