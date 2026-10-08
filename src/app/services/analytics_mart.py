@@ -2,9 +2,8 @@
 """Idempotent PostgreSQL projection from operational tables into the data mart.
 
 This service deliberately has no Alegra client: raw/current/operational tables
-are the contract between ingestion and analytics. A refresh replaces a single
-tenant's facts in one transaction, so reruns cannot duplicate measurements and
-source deletions are reflected immediately.
+are the contract between ingestion and analytics. Changed measurements and their
+completion ledger commit atomically; unchanged historical facts keep their keys.
 """
 
 import uuid
@@ -15,6 +14,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.models import MartRefreshRun
+from app.services.mart_incremental import (
+    prepare_snapshot_runs,
+    project_documents,
+    project_snapshots,
+)
 
 
 @dataclass(frozen=True)
@@ -29,8 +33,8 @@ class AnalyticsMartService:
         self._session = session
         self._default_currency_code = default_currency_code.strip().upper() or "COP"
 
-    def refresh(self, *, tenant_id: uuid.UUID) -> MartRefreshResult:
-        """Rebuild one tenant's facts from its typed operational projections."""
+    def refresh(self, *, tenant_id: uuid.UUID, full: bool = False) -> MartRefreshResult:
+        """Project changes; ``full`` also verifies already completed inventory runs."""
         run = MartRefreshRun(tenant_id=tenant_id)
         self._session.add(run)
         self._session.commit()
@@ -43,21 +47,43 @@ class AnalyticsMartService:
             params = {
                 "tenant_id": tenant_id,
                 "default_currency_code": self._default_currency_code,
+                "full_refresh": full,
             }
-            written = sum(
+            # Metadata/stock edits do not resolve NULL keys. Only newly available
+            # product/warehouse dimensions justify revisiting unresolved history.
+            params["dimensions_changed"] = bool(self._session.execute(text("""
+              SELECT EXISTS (
+                SELECT 1 FROM catalog_items i WHERE i.tenant_id=:tenant_id
+                  AND NOT EXISTS(SELECT 1 FROM dim_product d
+                    WHERE d.tenant_id=i.tenant_id AND d.alegra_id=i.alegra_id)
+              ) OR EXISTS (
+                SELECT 1 FROM warehouses w WHERE w.tenant_id=:tenant_id
+                  AND NOT EXISTS(SELECT 1 FROM dim_warehouse d
+                    WHERE d.tenant_id=w.tenant_id AND d.alegra_id=w.alegra_id)
+              )
+            """), params).scalar())
+            dimension_changes = sum(
                 max(int(self._session.execute(statement, params).rowcount or 0), 0)
-                for statement in _DIMENSIONS
+                for statement in _DIMENSIONS[:-1]
             )
-            for statement in _DELETE_FACTS:
-                self._session.execute(statement, params)
-            written += sum(
-                max(int(self._session.execute(statement, params).rowcount or 0), 0)
-                for statement in _FACTS
+            prepare_snapshot_runs(self._session, params)
+            written = dimension_changes + max(
+                int(self._session.execute(_DIMENSIONS[-1], params).rowcount or 0), 0
             )
-            written += sum(
-                max(int(self._session.execute(statement, params).rowcount or 0), 0)
-                for statement in _DERIVED
-            )
+            purchase_changes = 0
+            for statement in _FACTS:
+                if "INSERT INTO fact_inventory_snapshot" in str(statement):
+                    written += project_snapshots(self._session, statement, params)
+                else:
+                    changes = project_documents(self._session, statement, params)
+                    written += changes
+                    if "INSERT INTO fact_purchase_line" in str(statement):
+                        purchase_changes += changes
+            if purchase_changes or full:
+                written += sum(
+                    max(int(self._session.execute(statement, params).rowcount or 0), 0)
+                    for statement in _DERIVED
+                )
             run.status = "succeeded"
             run.records_written = written
             run.finished_at = datetime.now(UTC)
@@ -80,6 +106,8 @@ _DIMENSIONS = (
         SELECT id, slug, name, now() FROM tenants WHERE id = :tenant_id
         ON CONFLICT (tenant_id) DO UPDATE
         SET slug = EXCLUDED.slug, name = EXCLUDED.name, updated_at = now()
+        WHERE ROW(dim_tenant.slug,dim_tenant.name)
+          IS DISTINCT FROM ROW(EXCLUDED.slug,EXCLUDED.name)
         """
     ),
     text(
@@ -94,7 +122,7 @@ _DIMENSIONS = (
                COALESCE(
                  item.inventory_enabled,
                  EXISTS (
-                   SELECT 1 FROM inventory_snapshots snapshot
+                   SELECT 1 FROM product_daily_availability snapshot
                    WHERE snapshot.tenant_id = item.tenant_id
                      AND snapshot.item_alegra_id = item.alegra_id
                  )
@@ -110,6 +138,14 @@ _DIMENSIONS = (
           unit = EXCLUDED.unit, base_price = EXCLUDED.base_price,
           current_cost = EXCLUDED.current_cost, family_name = EXCLUDED.family_name,
           preferred_supplier_name = EXCLUDED.preferred_supplier_name, updated_at = now()
+        WHERE ROW(dim_product.source_hash,dim_product.is_deleted,dim_product.name,
+          dim_product.reference,dim_product.item_type,dim_product.status,
+          dim_product.inventory_enabled,dim_product.unit,dim_product.base_price,
+          dim_product.current_cost,dim_product.family_name,dim_product.preferred_supplier_name)
+        IS DISTINCT FROM ROW(EXCLUDED.source_hash,EXCLUDED.is_deleted,EXCLUDED.name,
+          EXCLUDED.reference,EXCLUDED.item_type,EXCLUDED.status,EXCLUDED.inventory_enabled,
+          EXCLUDED.unit,EXCLUDED.base_price,EXCLUDED.current_cost,EXCLUDED.family_name,
+          EXCLUDED.preferred_supplier_name)
         """
     ),
     text(
@@ -124,6 +160,10 @@ _DIMENSIONS = (
           source_hash = EXCLUDED.source_hash, is_deleted = EXCLUDED.is_deleted,
           name = EXCLUDED.name, identification = EXCLUDED.identification, email = EXCLUDED.email,
           contact_type = EXCLUDED.contact_type, status = EXCLUDED.status, updated_at = now()
+        WHERE ROW(dim_contact.source_hash,dim_contact.is_deleted,dim_contact.name,
+          dim_contact.identification,dim_contact.email,dim_contact.contact_type,dim_contact.status)
+        IS DISTINCT FROM ROW(EXCLUDED.source_hash,EXCLUDED.is_deleted,EXCLUDED.name,
+          EXCLUDED.identification,EXCLUDED.email,EXCLUDED.contact_type,EXCLUDED.status)
         """
     ),
     text(
@@ -135,6 +175,9 @@ _DIMENSIONS = (
         ON CONFLICT (tenant_id, alegra_id) DO UPDATE SET
           source_hash = EXCLUDED.source_hash, is_deleted = EXCLUDED.is_deleted,
           name = EXCLUDED.name, email = EXCLUDED.email, status = EXCLUDED.status, updated_at = now()
+        WHERE ROW(dim_seller.source_hash,dim_seller.is_deleted,dim_seller.name,
+          dim_seller.email,dim_seller.status) IS DISTINCT FROM ROW(EXCLUDED.source_hash,
+          EXCLUDED.is_deleted,EXCLUDED.name,EXCLUDED.email,EXCLUDED.status)
         """
     ),
     text(
@@ -147,6 +190,9 @@ _DIMENSIONS = (
           source_hash = EXCLUDED.source_hash, is_deleted = EXCLUDED.is_deleted,
           name = EXCLUDED.name, status = EXCLUDED.status, description = EXCLUDED.description,
           updated_at = now()
+        WHERE ROW(dim_warehouse.source_hash,dim_warehouse.is_deleted,dim_warehouse.name,
+          dim_warehouse.status,dim_warehouse.description) IS DISTINCT FROM ROW(EXCLUDED.source_hash,
+          EXCLUDED.is_deleted,EXCLUDED.name,EXCLUDED.status,EXCLUDED.description)
         """
     ),
     text(
@@ -160,6 +206,7 @@ _DIMENSIONS = (
           UNION SELECT adjustment_date FROM inventory_adjustments WHERE tenant_id = :tenant_id
           UNION SELECT transfer_date FROM warehouse_transfers WHERE tenant_id = :tenant_id
           UNION SELECT captured_at::date FROM inventory_snapshots WHERE tenant_id = :tenant_id
+            AND snapshot_run_id IN (SELECT snapshot_run_id FROM mart_pending_snapshot_runs)
         )
         INSERT INTO dim_date
           (date_key, calendar_date, year, quarter, month, day, iso_week, day_of_week, is_weekend)
@@ -175,17 +222,6 @@ _DIMENSIONS = (
         ON CONFLICT (date_key) DO NOTHING
         """
     ),
-)
-
-_DELETE_FACTS = tuple(
-    text(f"DELETE FROM {table} WHERE tenant_id = :tenant_id")
-    for table in (
-        "fact_inventory_movement",
-        "fact_inventory_snapshot",
-        "fact_payment",
-        "fact_purchase_line",
-        "fact_sales_line",
-    )
 )
 
 _FACTS = (

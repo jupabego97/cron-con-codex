@@ -76,9 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     mart = subparsers.add_parser(
         "refresh-mart",
-        help="Rebuild the tenant analytics data mart from operational PostgreSQL projections",
+        help="Incrementally refresh the tenant mart from operational PostgreSQL projections",
     )
     mart.add_argument("tenant_id", type=uuid.UUID)
+    mart.add_argument(
+        "--full", action="store_true",
+        help="Also verify and repair every historical inventory projection (maintenance)",
+    )
 
     costs = subparsers.add_parser(
         "allocate-sales-costs",
@@ -367,12 +371,12 @@ async def backfill_all(
     return all(result.status == "succeeded" for result in results)
 
 
-def refresh_mart(*, tenant_id: uuid.UUID) -> None:
+def refresh_mart(*, tenant_id: uuid.UUID, full: bool = False) -> None:
     with get_session_factory()() as session:
         result = AnalyticsMartService(
             session=session,
             default_currency_code=get_settings().analytics_default_currency_code,
-        ).refresh(tenant_id=tenant_id)
+        ).refresh(tenant_id=tenant_id, full=full)
         costs = HistoricalSalesCostService(session=session).allocate(tenant_id=tenant_id)
     print(
         f"mart={result.run_id} {result.status} written={result.records_written} "
@@ -427,11 +431,18 @@ def repair_purchase_lines(*, tenant_id: uuid.UUID, write_batch_size: int) -> Non
 
 
 async def snapshot_inventory(*, tenant_id: uuid.UUID, warehouse_concurrency: int) -> None:
-    """Backward-compatible command that leaves the new snapshot immediately queryable."""
-    await refresh_inventory_analytics(
-        tenant_id=tenant_id,
-        warehouse_concurrency=warehouse_concurrency,
-    )
+    """Capture only; the dedicated mart cron is the single scheduled projector."""
+    settings = get_settings()
+    if settings.alegra_api_basic_token is None:
+        raise RuntimeError("ALEGRA_API_BASIC_TOKEN is required for inventory capture")
+    with get_session_factory()() as session:
+        async with AlegraClient(
+            basic_token=settings.alegra_api_basic_token.get_secret_value()
+        ) as alegra:
+            snapshot = await InventorySnapshotService(session=session, alegra=alegra).capture(
+                tenant_id=tenant_id, warehouse_concurrency=warehouse_concurrency
+            )
+    print(f"snapshot={snapshot.run_id} {snapshot.status} rows={snapshot.records_written}")
 
 
 def main() -> None:
@@ -467,7 +478,7 @@ def main() -> None:
         if not succeeded:
             raise SystemExit(1)
     elif args.command == "refresh-mart":
-        refresh_mart(tenant_id=args.tenant_id)
+        refresh_mart(tenant_id=args.tenant_id, full=args.full)
     elif args.command == "allocate-sales-costs":
         allocate_sales_costs(tenant_id=args.tenant_id, cutoff_date=args.cutoff_date)
     elif args.command == "repair-purchase-lines":

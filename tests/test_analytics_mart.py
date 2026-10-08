@@ -24,6 +24,12 @@ def test_inventory_snapshot_is_available_as_a_tenant_scoped_command() -> None:
     assert args.warehouse_concurrency == 3
 
 
+def test_full_mart_verification_is_explicit_not_the_scheduled_default() -> None:
+    tenant = "4da4f10b-1fda-4e5e-91d1-17ef67502049"
+    assert not build_parser().parse_args(["refresh-mart", tenant]).full
+    assert build_parser().parse_args(["refresh-mart", tenant, "--full"]).full
+
+
 def test_purchase_line_repair_is_available_as_a_tenant_scoped_command() -> None:
     args = build_parser().parse_args(
         ["repair-purchase-lines", "4da4f10b-1fda-4e5e-91d1-17ef67502049"]

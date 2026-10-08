@@ -66,6 +66,12 @@ independiente, despues de la reconciliacion. Consulta
 `docs/architecture/phase-4-analytics-mart.md` para la granularidad, limites y
 consulta de dashboard.
 
+El refresco es incremental: conserva las claves y costos de hechos sin cambios,
+actualiza documentos modificados y proyecta solamente capturas pendientes. La
+primera ejecución verifica y adopta el histórico existente sin reescribirlo si
+coincide. Para verificar también todas las capturas ya procesadas, usa
+`python -m app.cli refresh-mart <tenant-uuid> --full` como mantenimiento explícito.
+
 ## Existencias actuales de inventario
 
 Los ajustes y transferencias no representan el stock actual. Para consultar el
@@ -81,6 +87,14 @@ En Railway, el Cron de captura requiere `DATABASE_URL` y
 `ALEGRA_API_BASIC_TOKEN`; el Cron de refresco del mart solo requiere
 `DATABASE_URL`. La configuracion recomendada esta en
 `docs/architecture/phase-4-analytics-mart.md`.
+
+`snapshot-inventory` solo captura: no dispara el mart ni el cálculo FIFO. El
+único refresco programado es `refresh-mart`. Para una operación manual que
+capture y publique inmediatamente, existe `refresh-inventory-analytics`.
+
+Los cinco servicios de aplicación dentro de Railway deben usar la referencia
+privada `DATABASE_URL=${{Postgres.DATABASE_URL}}`. Mantén la URL pública solo en
+tu entorno local; un host `*.railway.internal` no es accesible desde tu PC.
 
 ## Costo historico de inventario
 
