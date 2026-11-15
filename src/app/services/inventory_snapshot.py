@@ -125,8 +125,11 @@ class InventorySnapshotService:
                   max(s.captured_at) captured_at,sum(s.quantity_on_hand) quantity
                 FROM inventory_snapshots s JOIN inventory_snapshot_runs r
                   ON r.tenant_id=s.tenant_id AND r.id=s.snapshot_run_id AND r.status='succeeded'
-                WHERE s.tenant_id=:tenant AND (s.captured_at AT TIME ZONE 'America/Bogota')::date
-                  =(:captured AT TIME ZONE 'America/Bogota')::date
+                WHERE s.tenant_id=:tenant
+                  AND s.captured_at >= (date_trunc('day',CAST(:captured AS timestamptz)
+                    AT TIME ZONE 'America/Bogota') AT TIME ZONE 'America/Bogota')
+                  AND s.captured_at < ((date_trunc('day',CAST(:captured AS timestamptz)
+                    AT TIME ZONE 'America/Bogota')+interval '1 day') AT TIME ZONE 'America/Bogota')
                 GROUP BY s.tenant_id,s.item_alegra_id,s.snapshot_run_id) daily
               GROUP BY tenant_id,item_alegra_id,observed_on
               ON CONFLICT(tenant_id,item_alegra_id,observed_on) DO UPDATE SET

@@ -177,6 +177,35 @@ def test_large_multiwarehouse_capture_has_one_bounded_buffer(db, monkeypatch):
     ), {"t": tenant}) == 600
 
 
+def test_availability_range_keeps_exact_bogota_midnight_boundaries(db, monkeypatch):
+    session, tenant = db
+    stamp = datetime(2026, 11, 15, 5, tzinfo=UTC)  # midnight in Bogota
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return stamp
+
+    monkeypatch.setattr(inventory_snapshot, "datetime", Clock)
+    persist_resource_batch(session, tenant_id=tenant, resource="warehouse",
+                           payloads=[{"id": "W", "name": "Principal"}])
+    observation(session, tenant, stamp - timedelta(seconds=1))
+    observation(session, tenant, stamp + timedelta(days=1))
+    session.commit()
+
+    class Alegra:
+        async def iter_all_resource(self, *args, **kwargs):
+            yield {"id": "PC", "inventory": {"availableQuantity": 2}}
+
+    asyncio.run(InventorySnapshotService(session=session, alegra=Alegra()).capture(
+        tenant_id=tenant
+    ))
+    assert session.execute(text("""SELECT observed_on,sample_count,positive_samples,last_quantity
+      FROM product_daily_availability WHERE tenant_id=:t"""), {"t": tenant}).one() == (
+        date(2026, 11, 15), 1, 1, Decimal(2)
+    )
+
+
 @pytest.mark.parametrize("cancel", [False, True])
 def test_partial_capture_failure_cancels_other_readers_and_rolls_back(db, cancel):
     session, tenant = db

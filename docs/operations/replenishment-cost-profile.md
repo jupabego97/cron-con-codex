@@ -144,6 +144,12 @@ latencias y revisar `memory.events`. Un aumento de `max` con OOM=0 puede indicar
 recuperación de caché; OOM u OOM-kill exigen revertir. Una prueba puntual no
 garantiza capacidad para más tenants ni para toda la carga futura.
 
+La disponibilidad diaria filtra `captured_at` por un intervalo semiabierto
+desde medianoche de Colombia hasta la medianoche siguiente. Esto permite usar
+el índice existente `(tenant_id,captured_at)` en lugar de convertir la fecha de
+todas las capturas históricas. Los límites incluyen el inicio y excluyen el fin;
+no se modifica el historial ni la definición del día de negocio.
+
 Una base secundaria solo se puede detener tras revisar todas sus bases,
 referencias y conexiones y conservar un respaldo y su volumen. Detenerla es
 reversible; no eliminar servicio, volumen ni respaldos. Los volúmenes retenidos
