@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 import test_operations_postgres as contracts
 from app.db.models import InventorySnapshot, InventorySnapshotRun
 from app.domain.batch_repository import persist_resource_batch
+from app.services import inventory_snapshot
 from app.services.analytics_mart import AnalyticsMartService
 from app.services.inventory_snapshot import (
     InventorySnapshotService,
@@ -140,6 +141,89 @@ def test_capture_retains_daily_samples_with_shared_payloads(populated):
     assert session.execute(text("""SELECT sample_count,positive_samples,last_quantity
       FROM product_daily_availability WHERE tenant_id=:t AND item_alegra_id='PC'"""),
                            {"t": tenant}).one() == (2, 2, Decimal(2))
+
+
+def test_large_multiwarehouse_capture_has_one_bounded_buffer(db, monkeypatch):
+    session, tenant = db
+    persist_resource_batch(session, tenant_id=tenant, resource="warehouse", payloads=[
+        {"id": "W", "name": "Principal"}, {"id": "W2", "name": "Secundaria"},
+    ])
+    session.commit()
+    batch_sizes = []
+    original = inventory_snapshot._store_snapshot_rows
+
+    def store(session, rows):
+        batch_sizes.append(len(rows))
+        original(session, rows)
+
+    monkeypatch.setattr(inventory_snapshot, "_store_snapshot_rows", store)
+
+    class Alegra:
+        async def iter_all_resource(self, *args, **kwargs):
+            for index in range(600):
+                await asyncio.sleep(0)
+                yield {"id": str(index), "inventory": {"availableQuantity": 1, "unitCost": 600}}
+
+    result = asyncio.run(InventorySnapshotService(session=session, alegra=Alegra()).capture(
+        tenant_id=tenant
+    ))
+    assert result.records_read == result.records_written == 1200
+    assert max(batch_sizes) == 250 and sum(batch_sizes) == 1200
+    assert session.scalar(text(
+        "SELECT count(*) FROM inventory_snapshots WHERE tenant_id=:t"
+    ), {"t": tenant}) == 1200
+    assert session.scalar(text(
+        "SELECT count(*) FROM inventory_snapshot_payloads WHERE tenant_id=:t"
+    ), {"t": tenant}) == 600
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_partial_capture_failure_cancels_other_readers_and_rolls_back(db, cancel):
+    session, tenant = db
+    persist_resource_batch(session, tenant_id=tenant, resource="warehouse", payloads=[
+        {"id": "W", "name": "Principal"}, {"id": "W2", "name": "Secundaria"},
+    ])
+    session.commit()
+    stopped = set()
+
+    async def scenario():
+        staged = asyncio.Event()
+
+        class Alegra:
+            async def iter_all_resource(self, *args, **kwargs):
+                warehouse = kwargs["filters"]["idWarehouse"]
+                try:
+                    if warehouse == "W2":
+                        await asyncio.Event().wait()
+                    for index in range(300):
+                        await asyncio.sleep(0)
+                        yield {"id": str(index), "inventory": {"availableQuantity": 1}}
+                    staged.set()
+                    if cancel:
+                        await asyncio.Event().wait()
+                    raise RuntimeError("simulated upstream failure")
+                finally:
+                    stopped.add(warehouse)
+
+        task = asyncio.create_task(InventorySnapshotService(
+            session=session, alegra=Alegra()
+        ).capture(tenant_id=tenant))
+        if cancel:
+            await staged.wait()
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else RuntimeError):
+            await task
+
+    asyncio.run(scenario())
+    assert stopped == {"W", "W2"}
+    for table in (
+        "inventory_snapshots", "inventory_snapshot_payloads", "product_daily_availability"
+    ):
+        assert session.scalar(text(f"SELECT count(*) FROM {table} WHERE tenant_id=:t"),
+                              {"t": tenant}) == 0
+    assert session.scalar(text(
+        "SELECT status FROM inventory_snapshot_runs WHERE tenant_id=:t"
+    ), {"t": tenant}) == "failed"
 
 
 @pytest.mark.parametrize("today", [date(2026, 11, 15), date(2027, 1, 1)])

@@ -14,8 +14,15 @@ def get_engine():
     if not settings.database_url:
         raise RuntimeError("DATABASE_URL is required for database operations")
     return instrument_engine(
-        create_engine(normalize_database_url(settings.database_url), pool_pre_ping=True,
-                      hide_parameters=True, connect_args={"connect_timeout": 10})
+        create_engine(
+            normalize_database_url(settings.database_url),
+            pool_pre_ping=True,
+            pool_size=settings.database_pool_size,
+            max_overflow=settings.database_max_overflow,
+            pool_timeout=settings.database_pool_timeout_seconds,
+            hide_parameters=True,
+            connect_args={"connect_timeout": 10},
+        )
     )
 
 

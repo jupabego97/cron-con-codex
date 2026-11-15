@@ -263,6 +263,7 @@ def test_purchase_inputs_bound_last_purchase_to_as_of_date_and_use_selected_snap
 
     service._rows = capture  # type: ignore[method-assign]
     snapshot_id = uuid.uuid4()
+    service._iter_rows = capture  # type: ignore[method-assign]
 
     service._product_inputs(
         as_of=date(2026, 8, 20), currency_code="COP", snapshot_run_id=snapshot_id

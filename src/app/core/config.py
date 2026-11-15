@@ -3,7 +3,7 @@ from functools import lru_cache
 from typing import Literal
 from uuid import UUID
 
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     app_secret_key: SecretStr | None = None
 
     database_url: str | None = None
+    database_pool_size: int = Field(default=2, ge=1, le=50)
+    database_max_overflow: int = Field(default=2, ge=0, le=50)
+    database_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
     redis_url: str | None = None
     alegra_api_basic_token: SecretStr | None = None
     alegra_webhook_secret: SecretStr | None = None

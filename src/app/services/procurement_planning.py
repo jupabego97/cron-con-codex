@@ -8,6 +8,7 @@ import json
 import math
 import uuid
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
@@ -468,7 +469,7 @@ class ProcurementPlanningService:
             },
         )
         products = {int(row["product_key"]): row for row in rows}
-        daily_rows = self._rows(
+        daily_rows = self._iter_rows(
             """
             SELECT f.product_key,d.calendar_date,sum(f.quantity) units
             FROM fact_sales_line f JOIN dim_date d ON d.date_key=f.date_key
@@ -491,7 +492,7 @@ class ProcurementPlanningService:
                 product.setdefault("daily", {})[row["calendar_date"]] = Decimal(
                     str(row["units"] or 0)
                 )
-        availability = self._rows("""SELECT p.key product_key,a.observed_on,a.positive_samples
+        availability = self._iter_rows("""SELECT p.key product_key,a.observed_on,a.positive_samples
           FROM product_daily_availability a JOIN dim_product p
             ON p.tenant_id=a.tenant_id AND p.alegra_id=a.item_alegra_id
           WHERE a.tenant_id=:tenant_id AND a.observed_on BETWEEN :first AND :as_of""",
@@ -507,13 +508,7 @@ class ProcurementPlanningService:
         # Only demand inputs belong here: stock, budget, supplier and policy
         # changes must still recompute recommendations, not expensive backtests.
         # Preserve input order because ABC revenue ties use that same order.
-        inputs = [
-            [key, str(product.get("revenue") or 0), str(product.get("introduced_on")),
-             sorted((str(day), str(units)) for day, units in product.get("daily", {}).items()),
-             sorted((str(day), bool(available)) for day, available in product.get("availability", {}).items())]
-            for key, product in products.items()
-        ]
-        fingerprint = hashlib.sha256(json.dumps(inputs, separators=(",", ":")).encode()).hexdigest()
+        fingerprint = _forecast_fingerprint(products)
 
         def compute():
             forecasts = self._forecast_products(products, as_of=as_of)
@@ -1662,9 +1657,41 @@ class ProcurementPlanningService:
         values = {"tenant_id": self._tenant_id, **(params or {})}
         return [dict(row) for row in self._session.execute(text(statement), values).mappings()]
 
+    def _iter_rows(
+        self, statement: str, params: dict[str, Any] | None = None
+    ) -> Iterator[dict[str, Any]]:
+        """Stream demand inputs; never buffer a full year of availability twice."""
+        values = {"tenant_id": self._tenant_id, **(params or {})}
+        result = self._session.execute(
+            text(statement), values, execution_options={"yield_per": 500}
+        )
+        try:
+            for row in result.mappings():
+                yield dict(row)
+        finally:
+            result.close()
+
     def _one(self, statement: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
         rows = self._rows(statement, params)
         return rows[0] if rows else None
+
+
+def _forecast_fingerprint(products: dict[int, dict[str, Any]]) -> str:
+    # Exact same JSON bytes as the original list encoding, one product at a
+    # time. Do not allocate a second catalog-sized list/string/bytes object.
+    digest = hashlib.sha256()
+    digest.update(b"[")
+    for position, (key, product) in enumerate(products.items()):
+        if position:
+            digest.update(b",")
+        row = [
+            key, str(product.get("revenue") or 0), str(product.get("introduced_on")),
+            sorted((str(day), str(units)) for day, units in product.get("daily", {}).items()),
+            sorted((str(day), bool(value)) for day, value in product.get("availability", {}).items()),
+        ]
+        digest.update(json.dumps(row, separators=(",", ":")).encode())
+    digest.update(b"]")
+    return digest.hexdigest()
 
 
 def _croston(series: list[Decimal], *, sba: bool) -> Decimal:

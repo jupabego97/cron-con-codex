@@ -50,11 +50,14 @@ class InventorySnapshotService:
         captured_at = datetime.now(UTC)
         semaphore = asyncio.Semaphore(warehouse_concurrency)
         items_resource = RESOURCE_BY_KEY["item"]
+        # One shared bounded buffer; synchronous writes cannot interleave on this
+        # event loop. Keep all batches in the same capture transaction.
+        pending: list[dict[str, Any]] = []
 
-        async def read_warehouse(warehouse: Warehouse) -> tuple[int, list[dict[str, Any]]]:
+        async def read_warehouse(warehouse: Warehouse) -> tuple[int, int]:
             async with semaphore:
-                records: list[dict[str, Any]] = []
                 records_read = 0
+                records_written = 0
                 async for payload in self._alegra.iter_all_resource(
                     items_resource,
                     page_concurrency=3,
@@ -75,8 +78,12 @@ class InventorySnapshotService:
                         payload=payload,
                     )
                     if snapshot is not None:
-                        records.append(snapshot)
-                return records_read, records
+                        pending.append(snapshot)
+                        records_written += 1
+                        if len(pending) >= 250:
+                            _store_snapshot_rows(self._session, pending)
+                            pending.clear()
+                return records_read, records_written
 
         try:
             warehouses = list(
@@ -89,16 +96,22 @@ class InventorySnapshotService:
             )
             if not warehouses:
                 raise ValueError("No active warehouses are available for the inventory snapshot")
-            batches = await asyncio.gather(*(read_warehouse(warehouse) for warehouse in warehouses))
-            rows = [row for _, batch in batches for row in batch]
+            tasks = [asyncio.create_task(read_warehouse(warehouse)) for warehouse in warehouses]
+            try:
+                batches = await asyncio.gather(*tasks)
+            finally:
+                # A failed/cancelled producer must not continue inserting after
+                # the outer handler rolls back and records the failed run.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             run.records_read = sum(records_read for records_read, _ in batches)
-            if rows:
-                _store_snapshot_rows(self._session, rows)
-                # PostgreSQL may report rowcount=-1 for an INSERT .. ON CONFLICT
-                # statement even when it inserted rows. Rows are unique per new run.
-                run.records_written = len(rows)
-            else:
-                run.records_written = 0
+            if pending:
+                _store_snapshot_rows(self._session, pending)
+                pending.clear()
+            # Rows remain unique per new run; do not rely on driver rowcount=-1.
+            run.records_written = sum(count for _, count in batches)
             run.status = "succeeded"
             run.finished_at = datetime.now(UTC)
             self._session.flush()
@@ -122,13 +135,13 @@ class InventorySnapshotService:
                 {"tenant": tenant_id, "captured": captured_at},
             )
             self._session.commit()
-        except Exception as error:
+        except (Exception, asyncio.CancelledError) as error:
             self._session.rollback()
             failed = self._session.get(InventorySnapshotRun, run.id)
             if failed is None:
                 raise
             failed.status = "failed"
-            failed.error_message = str(error)[:2000]
+            failed.error_message = str(error)[:2000] or type(error).__name__
             failed.finished_at = datetime.now(UTC)
             self._session.commit()
             raise

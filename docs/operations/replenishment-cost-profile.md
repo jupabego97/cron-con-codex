@@ -114,6 +114,36 @@ Reponer, captura y mart. No concluir ahorro por el límite configurado: comparar
 uso observado y facturación. No bajar a 1 GB sin pruebas bajo carga representativa.
 Si hay errores o presión sostenida, restaurar el límite anterior (24 GB).
 
+### Perfil de memoria acotado
+
+El pool por proceso conserva dos conexiones y admite dos temporales: máximo
+cuatro simultáneas, con espera de 30 segundos. Variables opcionales:
+`DATABASE_POOL_SIZE`, `DATABASE_MAX_OVERFLOW`, `DATABASE_POOL_TIMEOUT_SECONDS`.
+El límite se multiplica por procesos/réplicas; no es global a la plataforma.
+Un backfill local de mayor concurrencia puede ampliarlo explícitamente.
+
+Reponer lee ventas diarias y disponibilidad mediante cursor de 500 filas,
+cerrándolo al terminar o interrumpir la lectura. Conserva el historial que
+requiere el modelo, pero no otra lista de todas las filas de PostgreSQL.
+La huella de pronósticos se calcula producto por producto: conserva exactamente
+los bytes y el orden anteriores, sin construir otro catálogo completo en JSON.
+No cambian ventanas de demanda, modelos, caché ni asignación de presupuesto.
+
+La captura usa un buffer compartido de hasta 250 observaciones para todas las
+bodegas. Cada lote se inserta en la misma transacción, sin retener el catálogo
+completo en RAM. Un fallo cancela y espera a las otras lecturas antes del
+rollback; ni filas parciales ni respuestas compartidas huérfanas se publican.
+La cancelación deja la ejecución auditada como fallida. La transacción permanece
+abierta durante la lectura: vigilar su duración y no incrementar concurrencia
+indiscriminadamente para compensar límites de la API de Alegra.
+
+Reducir PostgreSQL por etapas (2 → 1,5 GB y, solo tras verificar carga, 1 GB).
+La caché inactiva se puede recuperar sin borrar datos; no se busca quitar toda
+la caché. Probar captura, mart y Reponer concurrentes, comparar resultados y
+latencias y revisar `memory.events`. Un aumento de `max` con OOM=0 puede indicar
+recuperación de caché; OOM u OOM-kill exigen revertir. Una prueba puntual no
+garantiza capacidad para más tenants ni para toda la carga futura.
+
 Una base secundaria solo se puede detener tras revisar todas sus bases,
 referencias y conexiones y conservar un respaldo y su volumen. Detenerla es
 reversible; no eliminar servicio, volumen ni respaldos. Los volúmenes retenidos
