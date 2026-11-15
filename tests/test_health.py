@@ -17,7 +17,7 @@ def test_liveness_endpoint() -> None:
 
 
 @pytest.mark.parametrize("revision,expected_status", [
-    ("20261008_20", 200), ("20261008_21", 200), ("20261114_22", 200),
+    ("20261008_20", 200), ("20261008_21", 200), ("20261114_22", 200), ("20261115_23", 200),
     ("20261006_19", 503), ("unknown", 503),
 ])
 def test_readiness_endpoint(monkeypatch, revision, expected_status) -> None:

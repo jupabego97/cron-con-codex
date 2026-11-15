@@ -8,7 +8,7 @@ router = APIRouter(tags=["platform"])
 # The API's schema contract is unchanged by the additive CLI-only mart ledger.
 # Explicit compatibility allows an expand-first rollout without accepting an
 # unknown/older schema or making the previous API unhealthy during migration.
-_COMPATIBLE_SCHEMA_REVISIONS = {"20261008_20", "20261008_21", "20261114_22"}
+_COMPATIBLE_SCHEMA_REVISIONS = {"20261008_20", "20261008_21", "20261114_22", "20261115_23"}
 
 
 @router.get("/healthz", status_code=status.HTTP_200_OK)
