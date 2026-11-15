@@ -14,6 +14,7 @@ from app.db.models import InventorySnapshot, InventorySnapshotRun
 from app.domain.batch_repository import persist_resource_batch
 from app.services import inventory_snapshot
 from app.services.analytics_mart import AnalyticsMartService
+from app.services.analytics_queries import AnalyticsQueryService
 from app.services.inventory_snapshot import (
     InventorySnapshotService,
     _snapshot_row,
@@ -86,6 +87,33 @@ def test_quantity_and_cost_changes_create_distinct_exact_sources(populated):
     ), {"t": tenant}) == 3
     for snapshot_id, payload in originals:
         assert load_snapshot_payload(session, tenant_id=tenant, snapshot_id=snapshot_id) == payload
+
+
+def test_filter_date_edges_match_full_snapshot_history_and_isolate_tenants(db):
+    session, tenant = db
+    for stamp in (
+        datetime(2024, 12, 31, 23, 59, tzinfo=UTC),
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 11, 15, 5, tzinfo=UTC),
+    ):
+        observation(session, tenant, stamp)
+    AnalyticsMartService(session=session).refresh(tenant_id=tenant)
+    expected = dict(session.execute(text("""SELECT min(d.calendar_date) min_date,
+      max(d.calendar_date) max_date FROM fact_inventory_snapshot f
+      JOIN dim_date d ON d.date_key=f.date_key WHERE f.tenant_id=:t"""),
+                                   {"t": tenant}).mappings().one())
+    service = AnalyticsQueryService(session=session, tenant_id=tenant)
+    assert service.filters()["date_range"] == expected
+    other = uuid4()
+    session.execute(text("INSERT INTO tenants(id,slug,name) VALUES (:t,:s,'Other')"),
+                    {"t": other, "s": str(other)})
+    observation(session, other, datetime(2030, 1, 1, tzinfo=UTC))
+    AnalyticsMartService(session=session).refresh(tenant_id=other)
+    assert service.filters()["date_range"] == expected
+    empty = uuid4()
+    assert AnalyticsQueryService(session=session, tenant_id=empty).filters()["date_range"] == {
+        "min_date": None, "max_date": None,
+    }
 
 
 def test_failed_observation_rolls_back_shared_payload_and_forbids_cross_tenant_reference(db):

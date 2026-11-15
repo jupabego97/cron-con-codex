@@ -75,7 +75,15 @@ class AnalyticsQueryService:
         return {
             "date_range": self._one(
                 """
-                WITH used_dates AS (
+                WITH snapshot_edges AS (
+                    -- Snapshot date keys are projected from captured_at. Only
+                    -- the two indexed time edges can affect the date bounds.
+                    (SELECT date_key FROM fact_inventory_snapshot
+                     WHERE tenant_id=:tenant_id ORDER BY captured_at ASC LIMIT 1)
+                    UNION ALL
+                    (SELECT date_key FROM fact_inventory_snapshot
+                     WHERE tenant_id=:tenant_id ORDER BY captured_at DESC LIMIT 1)
+                ), used_dates AS (
                     SELECT date_key FROM fact_sales_line
                     WHERE tenant_id = :tenant_id AND is_deleted = false
                     UNION
@@ -88,8 +96,7 @@ class AnalyticsQueryService:
                     SELECT date_key FROM fact_inventory_movement
                     WHERE tenant_id = :tenant_id AND is_deleted = false
                     UNION
-                    SELECT date_key FROM fact_inventory_snapshot
-                    WHERE tenant_id = :tenant_id
+                    SELECT date_key FROM snapshot_edges
                 )
                 SELECT min(d.calendar_date) AS min_date, max(d.calendar_date) AS max_date
                 FROM dim_date d JOIN used_dates u ON u.date_key = d.date_key

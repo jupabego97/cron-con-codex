@@ -150,6 +150,20 @@ el índice existente `(tenant_id,captured_at)` en lugar de convertir la fecha de
 todas las capturas históricas. Los límites incluyen el inicio y excluyen el fin;
 no se modifica el historial ni la definición del día de negocio.
 
+Los filtros generales leen únicamente los dos extremos de capturas por el
+índice `(tenant_id,captured_at)` para calcular el rango histórico disponible.
+Las claves de fecha de estas capturas provienen de su `captured_at` en el mart.
+No se recorre cada observación de inventario para conocer la primera y última
+fecha; se conservan también los extremos aportados por ventas/compras/pagos/movimientos.
+
+Medición puntual del 15/11/2026, mismo tenant, 4.766 productos y 513.286
+observaciones diarias: preparación de entradas/huella de Reponer de 154,98 a
+45,98 MiB de pico Python (`tracemalloc`), con huella idéntica. El RSS máximo del
+proceso de prueba pasó de 510,12 a 186,06 MiB; incluye el costo del perfilador,
+no es la memoria en reposo del servicio API ni equivale a su facturación.
+La consulta del día pasó de un barrido de 56.712 bloques a 131 con el índice,
+sin cambiar el día seleccionado. Volver a medir ante cambios de volumen/carga.
+
 Una base secundaria solo se puede detener tras revisar todas sus bases,
 referencias y conexiones y conservar un respaldo y su volumen. Detenerla es
 reversible; no eliminar servicio, volumen ni respaldos. Los volúmenes retenidos
