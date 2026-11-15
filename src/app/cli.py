@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     worker = subparsers.add_parser("worker", help="Process the durable webhook queue")
     worker.add_argument("--poll-seconds", type=float, default=5.0)
+    worker.add_argument("--once", action="store_true", help="Drain one bounded batch and exit")
+    worker.add_argument("--max-events", type=int, default=500)
+    worker.add_argument("--max-seconds", type=float, default=240)
 
     backfill = subparsers.add_parser(
         "backfill-all", help="Extract complete history for all supported business resources"
@@ -192,17 +195,22 @@ async def sync_invoices(*, tenant_id: uuid.UUID, mode: str, lookback_days: int) 
             )
 
 
-async def process_webhooks(*, poll_seconds: float) -> None:
+async def process_webhooks(*, poll_seconds: float, once: bool = False,
+                           max_events: int = 500, max_seconds: float = 240) -> None:
     settings = get_settings()
     if settings.alegra_api_basic_token is None:
         raise RuntimeError("ALEGRA_API_BASIC_TOKEN is required for worker")
-    if poll_seconds <= 0:
-        raise ValueError("poll_seconds must be positive")
+    if poll_seconds <= 0 or max_events < 1 or max_seconds <= 0:
+        raise ValueError("Worker limits must be positive")
     with get_session_factory()() as session:
         async with AlegraClient(
             basic_token=settings.alegra_api_basic_token.get_secret_value()
         ) as alegra:
             worker = WebhookWorker(session=session, alegra=alegra)
+            if once:
+                result = await worker.run_batch(max_events=max_events, max_seconds=max_seconds)
+                print(f"webhooks attempted={result.attempted} stop={result.stop_reason}")
+                return
             while True:
                 processed = await worker.run_once()
                 if not processed:
@@ -244,7 +252,9 @@ async def refresh_inventory_analytics(*, tenant_id: uuid.UUID, warehouse_concurr
             session=session,
             default_currency_code=settings.analytics_default_currency_code,
         ).refresh(tenant_id=tenant_id)
-        costs = HistoricalSalesCostService(session=session).allocate(tenant_id=tenant_id)
+        costs = HistoricalSalesCostService(session=session).allocate(
+            tenant_id=tenant_id, only_if_changed=True
+        )
     print(
         f"snapshot={snapshot.run_id} {snapshot.status} rows={snapshot.records_written} "
         f"mart={mart.run_id} {mart.status} cost={costs.lines_costed}/{costs.lines_read}"
@@ -377,7 +387,9 @@ def refresh_mart(*, tenant_id: uuid.UUID, full: bool = False) -> None:
             session=session,
             default_currency_code=get_settings().analytics_default_currency_code,
         ).refresh(tenant_id=tenant_id, full=full)
-        costs = HistoricalSalesCostService(session=session).allocate(tenant_id=tenant_id)
+        costs = HistoricalSalesCostService(session=session).allocate(
+            tenant_id=tenant_id, only_if_changed=True
+        )
     print(
         f"mart={result.run_id} {result.status} written={result.records_written} "
         f"cost={costs.run_id} {costs.status} lines={costs.lines_costed}/"
@@ -461,7 +473,10 @@ def main() -> None:
         )
     elif args.command == "worker":
         with suppress(KeyboardInterrupt):
-            asyncio.run(process_webhooks(poll_seconds=args.poll_seconds))
+            asyncio.run(process_webhooks(
+                poll_seconds=args.poll_seconds, once=args.once,
+                max_events=args.max_events, max_seconds=args.max_seconds,
+            ))
     elif args.command == "backfill-all":
         succeeded = asyncio.run(
             backfill_all(

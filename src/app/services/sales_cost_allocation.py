@@ -13,6 +13,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services.cost_fingerprints import projection_fingerprint, source_fingerprint
+
 
 @dataclass(frozen=True)
 class SalesCostAllocationResult:
@@ -83,6 +85,7 @@ class HistoricalSalesCostService:
         *,
         tenant_id: uuid.UUID,
         cutoff_date: date = date(2026, 1, 1),
+        only_if_changed: bool = False,
     ) -> SalesCostAllocationResult:
         if not self._has_opening_layers(tenant_id=tenant_id, cutoff_date=cutoff_date):
             return SalesCostAllocationResult(
@@ -127,6 +130,40 @@ class HistoricalSalesCostService:
                 {"tenant_id": str(tenant_id)},
             )
             warehouse_key = self._default_warehouse_key(tenant_id=tenant_id)
+            source_hash = source_fingerprint(
+                self._session, tenant_id=tenant_id, cutoff_date=cutoff_date,
+                warehouse_key=warehouse_key,
+            )
+            if only_if_changed:
+                cached = self._session.execute(text("""
+                    SELECT * FROM sales_cost_allocation_runs
+                    WHERE tenant_id=:tenant AND cutoff_date=:cutoff
+                      AND source_fingerprint=:source
+                      AND status IN ('succeeded','succeeded_with_exceptions')
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                """), {
+                    "tenant": tenant_id, "cutoff": cutoff_date, "source": source_hash,
+                }).mappings().first()
+                if cached is not None and cached["projection_fingerprint"] == (
+                    projection_fingerprint(self._session, tenant_id=tenant_id)
+                ):
+                    self._session.execute(text("""
+                        UPDATE sales_cost_allocation_runs SET status='skipped_unchanged',
+                          lines_read=:lines_read,lines_costed=:lines_costed,lines_partial=:lines_partial,
+                          lines_unavailable=:lines_unavailable,sales_units=:sales_units,
+                          costed_units=:costed_units,cogs_amount=:cogs_amount,
+                          source_fingerprint=:source_fingerprint,
+                          projection_fingerprint=:projection_fingerprint,finished_at=now()
+                        WHERE id=:id
+                    """), {**dict(cached), "id": run_id})
+                    self._session.commit()
+                    return SalesCostAllocationResult(
+                        run_id=run_id, status="skipped_unchanged",
+                        **{key: cached[key] for key in (
+                            "lines_read", "lines_costed", "lines_partial", "lines_unavailable",
+                            "sales_units", "costed_units", "cogs_amount",
+                        )},
+                    )
             self._reset_ledger(tenant_id=tenant_id)
             self._create_purchase_layers(
                 tenant_id=tenant_id,
@@ -158,7 +195,9 @@ class HistoricalSalesCostService:
                     SET status=:status, lines_read=:lines_read, lines_costed=:lines_costed,
                         lines_partial=:lines_partial, lines_unavailable=:lines_unavailable,
                         sales_units=:sales_units, costed_units=:costed_units,
-                        cogs_amount=:cogs_amount, finished_at=now()
+                        cogs_amount=:cogs_amount, finished_at=now(),
+                        source_fingerprint=:source_fingerprint,
+                        projection_fingerprint=:projection_fingerprint
                     WHERE id=:id
                     """
                 ),
@@ -172,6 +211,10 @@ class HistoricalSalesCostService:
                     "sales_units": result.sales_units,
                     "costed_units": result.costed_units,
                     "cogs_amount": result.cogs_amount,
+                    "source_fingerprint": source_hash,
+                    "projection_fingerprint": projection_fingerprint(
+                        self._session, tenant_id=tenant_id
+                    ),
                 },
             )
             self._session.commit()

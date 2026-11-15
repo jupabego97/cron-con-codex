@@ -39,6 +39,11 @@ Railway debe ejecutar `python -m app.cli migrate` como comando pre-deploy. El se
 
 ## Backfill historico local
 
+Para el perfil económico centrado en **Reponer** (worker por lotes, pronósticos
+reutilizables y FIFO condicionado), consulta
+`docs/operations/replenishment-cost-profile.md`. No modifica los algoritmos,
+el histórico ni la frecuencia de los crons de reconciliación/captura/mart.
+
 Tras crear el tenant y configurar `DATABASE_URL` y `ALEGRA_API_BASIC_TOKEN`:
 
 ```powershell

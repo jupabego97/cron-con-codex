@@ -1,4 +1,6 @@
+import time
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
@@ -14,12 +16,33 @@ from app.services.event_queue import (
 )
 
 
+@dataclass(frozen=True)
+class WebhookBatchResult:
+    attempted: int
+    stop_reason: str
+
+
 class WebhookWorker:
     """Processes one durably claimed event at a time outside the webhook request path."""
 
     def __init__(self, *, session: Session, alegra: AlegraClient) -> None:
         self._session = session
         self._alegra = alegra
+
+    async def run_batch(self, *, max_events: int = 500,
+                        max_seconds: float = 240) -> WebhookBatchResult:
+        if max_events < 1 or max_seconds <= 0:
+            raise ValueError("Batch limits must be positive")
+        deadline = time.monotonic() + max_seconds
+        attempted = 0
+        while attempted < max_events:
+            if time.monotonic() >= deadline:
+                return WebhookBatchResult(attempted, "time_limit")
+            if not await self.run_once():
+                return WebhookBatchResult(attempted, "queue_empty")
+            attempted += 1
+        # Finish an in-flight event normally; never cancel a committed lease.
+        return WebhookBatchResult(attempted, "event_limit")
 
     async def run_once(self) -> bool:
         event = claim_next_event(self._session)

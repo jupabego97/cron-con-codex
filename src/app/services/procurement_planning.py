@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.core.business_time import business_today
 from app.integrations.alegra.client import AlegraAuthenticationError, AlegraClient
+from app.services.forecast_memo import forecast_memo
 
 
 def _lead_time(supplier: dict) -> int:
@@ -154,7 +155,9 @@ class ProcurementPlanningService:
             currency_code=currency_code,
             snapshot_run_id=quality.get("snapshot_run_id"),
         )
-        forecasts = self._forecast_products(products, as_of=as_of)
+        forecasts = self._cached_forecast_products(
+            products, as_of=as_of, currency_code=currency_code
+        )
         supplier_options = self._supplier_options(as_of=as_of, currency_code=currency_code)
         all_lines = self._recommend(
             products=products,
@@ -485,6 +488,33 @@ class ProcurementPlanningService:
             if int(row["product_key"]) in products:
                 products[int(row["product_key"])].setdefault("availability", {})[row["observed_on"]] = row["positive_samples"] > 0
         return products
+
+    def _cached_forecast_products(
+        self, products: dict[int, dict[str, Any]], *, as_of: date, currency_code: str
+    ) -> dict[int, ForecastResult]:
+        # Only demand inputs belong here: stock, budget, supplier and policy
+        # changes must still recompute recommendations, not expensive backtests.
+        # Preserve input order because ABC revenue ties use that same order.
+        inputs = [
+            [key, str(product.get("revenue") or 0), str(product.get("introduced_on")),
+             sorted((str(day), str(units)) for day, units in product.get("daily", {}).items()),
+             sorted((str(day), bool(available)) for day, available in product.get("availability", {}).items())]
+            for key, product in products.items()
+        ]
+        fingerprint = hashlib.sha256(json.dumps(inputs, separators=(",", ":")).encode()).hexdigest()
+
+        def compute():
+            forecasts = self._forecast_products(products, as_of=as_of)
+            histories = {key: dict(product["forecast_history"]) for key, product in products.items()}
+            return forecasts, histories
+
+        forecasts, histories = forecast_memo.get_or_compute(
+            ("forecast-v1", str(self._tenant_id), currency_code, as_of, fingerprint),
+            product_count=len(products), compute=compute,
+        )
+        for key, history in histories.items():
+            products[key]["forecast_history"] = dict(history)
+        return dict(forecasts)
 
     def _forecast_products(
         self, products: dict[int, dict[str, Any]], *, as_of: date
