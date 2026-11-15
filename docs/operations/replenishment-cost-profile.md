@@ -67,3 +67,54 @@ Verificar `/readyz`, login, `/api/v1/procurement/preview`, y una ejecución
 programada del worker que termine, además de reintentos y cola pendiente.
 El ahorro monetario se mide luego por servicio: no equivale automáticamente a
 la diferencia de tiempo de un benchmark y depende del mínimo del plan.
+
+## Vigencia del inventario y medianoche
+
+Para pedidos de hoy (zona `America/Bogota`) se selecciona la última captura
+exitosa que ya esté en el mart, sin exigir que pertenezca al mismo día.
+Se rechazan fechas futuras y sigue siendo obligatorio que tenga como máximo
+seis horas. El mart y las sincronizaciones mantienen sus controles anteriores.
+La pantalla muestra la hora real de la captura en Colombia.
+
+Las consultas históricas siguen exigiendo una captura de la fecha solicitada;
+no toman stock actual como si fuera histórico ni habilitan pedidos históricos.
+
+## Respuestas de capturas sin duplicación
+
+La migración `20261115_23` añade `inventory_snapshot_payloads` y una referencia
+opcional en `inventory_snapshots`. Antes de aplicarla debe estar activo el API
+de compatibilidad `8c0da80` o posterior. El DDL tiene un límite de espera de
+bloqueos de cinco segundos; si falla, investigar y reintentar sin forzar bloqueos.
+
+Cada captura nueva conserva todas sus filas, cantidades, costos, fecha y bodega.
+Respuestas JSON completas e idénticas comparten una copia SHA-256 dentro del
+mismo tenant; cualquier cambio genera otra copia. Inserciones por lotes de 250
+respuestas / 500 observaciones evitan sentencias gigantes. Las referencias y
+las respuestas se escriben en la misma transacción, con FK compuesta por tenant.
+
+El histórico anterior queda exactamente como estaba. Para leer trazabilidad de
+ambos formatos usar `load_snapshot_payload(session, tenant_id=..., snapshot_id=...)`
+en `app.services.inventory_snapshot`, o un LEFT JOIN por tenant/hash y
+`coalesce(s.payload,p.payload)`. `payload=NULL` con hash indica una referencia,
+no una respuesta perdida. No consultar solo `inventory_snapshots.payload` para
+auditar capturas nuevas. Las consultas del mart no cambian: usan columnas numéricas.
+
+Esto reduce crecimiento futuro, no recupera automáticamente los GB existentes.
+No ejecutar compactación, retención, `VACUUM FULL` ni borrado histórico como parte
+del despliegue. Un rollback de código conserva el esquema 23: los escritores
+anteriores pueden seguir insertando JSON completo; el downgrade se niega a
+eliminar la estructura si ya existen referencias.
+
+## Ajuste de recursos PostgreSQL
+
+Crear respaldo reciente antes de modificar recursos. Primer límite conservador:
+2 GB de RAM, sin bajar CPU ni cambiar parámetros de PostgreSQL al mismo tiempo.
+Comprobar el límite efectivo del cgroup, `memory.events` (OOM), `/readyz`,
+Reponer, captura y mart. No concluir ahorro por el límite configurado: comparar
+uso observado y facturación. No bajar a 1 GB sin pruebas bajo carga representativa.
+Si hay errores o presión sostenida, restaurar el límite anterior (24 GB).
+
+Una base secundaria solo se puede detener tras revisar todas sus bases,
+referencias y conexiones y conservar un respaldo y su volumen. Detenerla es
+reversible; no eliminar servicio, volumen ni respaldos. Los volúmenes retenidos
+pueden seguir teniendo costo de almacenamiento aunque no haya cómputo.

@@ -4,9 +4,11 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     Numeric,
     String,
@@ -470,6 +472,16 @@ class InventorySnapshotRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
 
 
+class InventorySnapshotPayload(Base):
+    """Immutable raw responses shared only within one tenant."""
+
+    __tablename__ = "inventory_snapshot_payloads"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    content_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+
 class InventorySnapshot(Base):
     __tablename__ = "inventory_snapshots"
     __table_args__ = (
@@ -478,6 +490,16 @@ class InventorySnapshot(Base):
             "warehouse_alegra_id",
             "item_alegra_id",
             name="uq_inventory_snapshot_run_warehouse_item",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "payload_hash"],
+            ["inventory_snapshot_payloads.tenant_id", "inventory_snapshot_payloads.content_hash"],
+            name="fk_inventory_snapshot_payload",
+        ),
+        CheckConstraint(
+            "(payload IS NOT NULL AND payload_hash IS NULL) OR "
+            "(payload IS NULL AND payload_hash IS NOT NULL)",
+            name="ck_inventory_snapshot_payload_source",
         ),
     )
 
@@ -494,4 +516,5 @@ class InventorySnapshot(Base):
     item_name: Mapped[str] = mapped_column(String(500), nullable=False)
     quantity_on_hand: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(64))

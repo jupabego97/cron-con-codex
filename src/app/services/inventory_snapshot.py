@@ -2,6 +2,8 @@
 """Capture current stock from Alegra once for every active warehouse."""
 
 import asyncio
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,7 +14,12 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.db.models import InventorySnapshot, InventorySnapshotRun, Warehouse
+from app.db.models import (
+    InventorySnapshot,
+    InventorySnapshotPayload,
+    InventorySnapshotRun,
+    Warehouse,
+)
 from app.integrations.alegra.client import AlegraClient
 from app.integrations.alegra.resources import RESOURCE_BY_KEY
 
@@ -86,12 +93,7 @@ class InventorySnapshotService:
             rows = [row for _, batch in batches for row in batch]
             run.records_read = sum(records_read for records_read, _ in batches)
             if rows:
-                insert = (
-                    pg_insert(InventorySnapshot)
-                    .values(rows)
-                    .on_conflict_do_nothing(constraint="uq_inventory_snapshot_run_warehouse_item")
-                )
-                self._session.execute(insert)
+                _store_snapshot_rows(self._session, rows)
                 # PostgreSQL may report rowcount=-1 for an INSERT .. ON CONFLICT
                 # statement even when it inserted rows. Rows are unique per new run.
                 run.records_written = len(rows)
@@ -136,6 +138,54 @@ class InventorySnapshotService:
             records_read=run.records_read,
             records_written=run.records_written,
         )
+
+
+def _store_snapshot_rows(session: Session, rows: list[dict[str, Any]]) -> None:
+    """Share complete identical responses, preserving every stock observation.
+
+    Payloads and their references are committed in the capture's transaction.
+    Nothing updates or compacts pre-existing historical rows.
+    """
+    payloads: dict[tuple[uuid.UUID, str], dict[str, Any]] = {}
+    observations = []
+    for row in rows:
+        payload = row["payload"]
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
+        content_hash = hashlib.sha256(encoded).hexdigest()
+        key = (row["tenant_id"], content_hash)
+        payloads[key] = {
+            "tenant_id": row["tenant_id"], "content_hash": content_hash, "payload": payload,
+        }
+        observations.append({**row, "payload": None, "payload_hash": content_hash})
+    unique_payloads = list(payloads.values())
+    for start in range(0, len(unique_payloads), 250):
+        session.execute(pg_insert(InventorySnapshotPayload).values(
+            unique_payloads[start:start + 250]
+        ).on_conflict_do_nothing(index_elements=["tenant_id", "content_hash"]))
+    for start in range(0, len(observations), 500):
+        session.execute(pg_insert(InventorySnapshot).values(
+            observations[start:start + 500]
+        ).on_conflict_do_nothing(constraint="uq_inventory_snapshot_run_warehouse_item"))
+
+
+def load_snapshot_payload(
+    session: Session, *, tenant_id: uuid.UUID, snapshot_id: uuid.UUID
+) -> dict[str, Any] | None:
+    """Resolve either a legacy raw response or a tenant-scoped shared response."""
+    row = session.execute(text("""
+      SELECT coalesce(s.payload,p.payload) AS payload
+      FROM inventory_snapshots s
+      LEFT JOIN inventory_snapshot_payloads p
+        ON p.tenant_id=s.tenant_id AND p.content_hash=s.payload_hash
+      WHERE s.tenant_id=:tenant AND s.id=:snapshot
+    """), {"tenant": tenant_id, "snapshot": snapshot_id}).mappings().one_or_none()
+    if row is None:
+        return None
+    if not isinstance(row["payload"], dict):
+        raise ValueError("Snapshot raw response is missing")
+    return row["payload"]
 
 
 def _snapshot_row(

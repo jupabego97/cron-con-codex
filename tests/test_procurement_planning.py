@@ -318,6 +318,38 @@ def test_data_quality_rejects_a_mart_older_than_latest_source_sync(monkeypatch) 
     assert "El mart es anterior a la ultima sincronizacion de Alegra" in quality["warnings"]
 
 
+def test_current_quality_accepts_a_fresh_previous_day_capture(monkeypatch) -> None:
+    now = datetime(2026, 11, 15, 5, 30, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr("app.services.procurement_planning.datetime", Clock)
+    monkeypatch.setattr("app.services.procurement_planning.business_today", lambda: now.date())
+    service = ProcurementPlanningService(session=None, tenant_id=uuid.uuid4())  # type: ignore[arg-type]
+    captured_params = {}
+
+    def one(statement, params=None):
+        captured_params.update(params or {})
+        return {
+            "snapshot_run_id": uuid.uuid4(), "snapshot_at": now - timedelta(hours=2),
+            "invoice_sync_at": now - timedelta(hours=1),
+            "bill_sync_at": now - timedelta(hours=1),
+            "po_sync_at": now - timedelta(hours=1),
+            "item_sync_at": now - timedelta(days=30),
+            "contact_sync_at": now - timedelta(days=30),
+            "mart_at": now - timedelta(minutes=10), "unmapped_supplier_documents": 0,
+        }
+
+    service._one = one  # type: ignore[method-assign]
+    quality = service.data_quality()
+    assert quality["ready"] is True and quality["warnings"] == []
+    assert captured_params["is_current"] is True
+    assert captured_params["checked_at"] == now
+
+
 def test_ambiguous_purchase_order_response_is_never_resent() -> None:
     class SessionStub:
         def __init__(self) -> None:

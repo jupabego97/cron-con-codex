@@ -218,7 +218,10 @@ class ProcurementPlanningService:
         return result
 
     def data_quality(self, *, as_of: date | None = None) -> dict[str, Any]:
-        as_of = as_of or business_today()
+        today = business_today()
+        as_of = as_of or today
+        now = datetime.now(UTC)
+        is_current = as_of == today
         row = (
             self._one(
                 """
@@ -226,7 +229,9 @@ class ProcurementPlanningService:
               SELECT r.id, r.finished_at
               FROM inventory_snapshot_runs r
               WHERE r.tenant_id=:tenant_id AND r.status='succeeded'
-                AND (r.finished_at AT TIME ZONE 'America/Bogota')::date=:as_of
+                AND r.finished_at<=:checked_at
+                AND (:is_current OR
+                  (r.finished_at AT TIME ZONE 'America/Bogota')::date=:as_of)
                 AND EXISTS (
                   SELECT 1 FROM fact_inventory_snapshot f
                   WHERE f.tenant_id=r.tenant_id AND f.snapshot_run_id=r.id
@@ -259,20 +264,27 @@ class ProcurementPlanningService:
                       AND (f.provider_key IS NULL OR c.key IS NULL)) AS unmapped_supplier_documents
             FROM states LEFT JOIN materialized ON true
             """,
-                {"as_of": as_of, "history_from": as_of - timedelta(days=364)},
+                {
+                    "as_of": as_of,
+                    "history_from": as_of - timedelta(days=364),
+                    "checked_at": now,
+                    "is_current": is_current,
+                },
             )
             or {}
         )
-        now = datetime.now(UTC)
         snapshot_at = row.get("snapshot_at")
         bill_sync_at = row.get("bill_sync_at")
         po_sync_at = row.get("po_sync_at")
         item_sync_at = row.get("item_sync_at")
         contact_sync_at = row.get("contact_sync_at")
-        is_current = as_of == business_today()
         warnings = []
         if snapshot_at is None:
-            warnings.append(f"No hay captura de inventario para {as_of.isoformat()}")
+            warnings.append(
+                "No hay captura de inventario materializada"
+                if is_current
+                else f"No hay captura de inventario para {as_of.isoformat()}"
+            )
         elif is_current and now - snapshot_at > timedelta(hours=6):
             warnings.append("Inventario sin una captura materializada en las ultimas 6 horas")
         sync_times = [

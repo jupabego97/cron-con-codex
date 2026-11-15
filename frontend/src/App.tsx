@@ -1810,6 +1810,13 @@ function PurchaseRecommendations({
           Datos actualizados y listos para preparar pedidos.
         </div>
       )}
+      {typeof quality.snapshot_at === "string" && (
+        <p className="muted">
+          Captura de inventario: {new Date(quality.snapshot_at).toLocaleString("es-CO", {
+            timeZone: "America/Bogota",
+          })} (hora de Colombia). Vigencia para pedidos actuales: 6 horas.
+        </p>
+      )}
       {qualityNotes.map((note) => (
         <div className="warning" key={note}>
           {note}
