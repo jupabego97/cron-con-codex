@@ -89,6 +89,7 @@ type ReplenishmentParams = {
 };
 
 const tabs: Array<[Tab, string]> = [
+  ["purchase-recommendations", "Reponer"],
   ["today", "Hoy"],
   ["overview", "Resumen"],
   ["sales", "Ventas"],
@@ -99,7 +100,6 @@ const tabs: Array<[Tab, string]> = [
   ["product-workspace", "Productos"],
   ["products", "Rotación"],
   ["kpis", "Indicadores"],
-  ["purchase-recommendations", "Reponer"],
   ["inventory", "Inventario"],
   ["alerts", "Alertas"],
   ["assistant", "Asistente IA"],
@@ -108,6 +108,11 @@ const tabs: Array<[Tab, string]> = [
   ["repairs", "Servicio técnico"],
   ["system", "Estado"],
 ];
+
+function tabFromLocation(): Tab {
+  const value = new URLSearchParams(location.search).get("tab");
+  return tabs.find(([key]) => key === value)?.[0] ?? "purchase-recommendations";
+}
 
 function todayIso(): string {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -170,10 +175,7 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [filters, setFilters] = useState<Filters>(initialFilters);
   const [filterData, setFilterData] = useState<FilterData | null>(null);
-  const [tab, setTab] = useState<Tab>(() => {
-    const value = new URLSearchParams(location.search).get("tab");
-    return tabs.some(([key]) => key === value) ? (value as Tab) : "today";
-  });
+  const [tab, setTab] = useState<Tab>(tabFromLocation);
   const [savedViews, setSavedViews] = useState<
     Array<{
       name: string;
@@ -224,8 +226,7 @@ export default function App() {
     const change = () => {
       setFilters(initialFilters());
       setReplenishmentParams(initialReplenishmentParams());
-      const value = new URLSearchParams(location.search).get("tab");
-      setTab(tabs.some(([key]) => key === value) ? (value as Tab) : "today");
+      setTab(tabFromLocation());
     };
     window.addEventListener("popstate", change);
     return () => window.removeEventListener("popstate", change);
@@ -252,9 +253,23 @@ export default function App() {
       .catch((requestError: Error) => setError(requestError.message));
   }, [authenticated]);
 
+  const dataPath =
+    tab === "assistant" || operationTabs.has(tab)
+      ? null
+      : tab === "purchase-recommendations"
+        ? `/procurement/preview${query({}, {
+            ...replenishmentParams,
+            as_of_date: filters.to_date,
+            currency_code: filters.currency,
+            product_key: filters.product_key,
+            family: filters.family,
+            provider_key: filters.provider_key,
+          })}`
+        : `/analytics/${tab}${query(filters)}`;
+
   useEffect(() => {
     if (!authenticated) return;
-    if (tab === "assistant" || operationTabs.has(tab)) {
+    if (dataPath === null) {
       setData(null);
       setLoading(false);
       setError(null);
@@ -262,12 +277,8 @@ export default function App() {
     }
     setLoading(true);
     setError(null);
-    const path =
-      tab === "purchase-recommendations"
-        ? `/procurement/preview${query(filters, { ...replenishmentParams, as_of_date: filters.to_date })}`
-        : `/analytics/${tab}${query(filters)}`;
     const controller = new AbortController();
-    api<Record<string, unknown>>(path, { signal: controller.signal })
+    api<Record<string, unknown>>(dataPath, { signal: controller.signal })
       .then((value) => {
         if (!controller.signal.aborted) setData(value);
       })
@@ -278,7 +289,7 @@ export default function App() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [authenticated, filters, tab, replenishmentParams]);
+  }, [authenticated, dataPath]);
 
   if (authenticated === null)
     return <main className="splash">Cargando Retail Intelligence…</main>;
@@ -477,9 +488,24 @@ function FiltersBar({
     if (historyFrom && historyTo)
       setFilters({ ...filters, from_date: historyFrom, to_date: historyTo });
   };
+  const isReplenishment = tab === "purchase-recommendations";
   return (
     <section className="filters">
-      {tab !== "treasury" && (
+      {isReplenishment ? (
+        <>
+          <label>
+            Fecha de corte
+            <input
+              type="date"
+              min={historyFrom}
+              max={todayIso()}
+              value={filters.to_date}
+              onChange={(event) => update("to_date", event.target.value || todayIso())}
+            />
+          </label>
+          <button onClick={() => update("to_date", todayIso())}>Usar hoy</button>
+        </>
+      ) : tab !== "treasury" ? (
         <>
           <div className="quick-ranges" aria-label="Rangos rápidos">
             {[30, 90, 365].map((days) => (
@@ -515,48 +541,55 @@ function FiltersBar({
             />
           </label>
         </>
-      )}
+      ) : null}
       <Select
         label="Moneda"
         value={filters.currency}
         options={options?.currencies}
         onChange={(value) => update("currency", value)}
+        emptyLabel={isReplenishment ? "COP (predeterminada)" : undefined}
       />
       {!["treasury", "repairs"].includes(tab) && (
         <>
-          <label>
-            Modo de cifras
-            <select
-              value={filters.metric_scope || "commercial"}
-              onChange={(event) =>
-                setFilters({
-                  ...filters,
-                  metric_scope: event.target.value as Filters["metric_scope"],
-                })
-              }
-            >
-              <option value="commercial">Comercial · open / closed</option>
-              <option value="audit">Auditoría · todos los estados</option>
-            </select>
-          </label>
+          {!isReplenishment && (
+            <label>
+              Modo de cifras
+              <select
+                value={filters.metric_scope || "commercial"}
+                onChange={(event) =>
+                  setFilters({
+                    ...filters,
+                    metric_scope: event.target.value as Filters["metric_scope"],
+                  })
+                }
+              >
+                <option value="commercial">Comercial · open / closed</option>
+                <option value="audit">Auditoría · todos los estados</option>
+              </select>
+            </label>
+          )}
           <Select
             label="Producto"
             value={filters.product_key}
             options={options?.products}
             onChange={(value) => update("product_key", value)}
           />
-          <Select
-            label="Vendedor"
-            value={filters.seller_key}
-            options={options?.sellers}
-            onChange={(value) => update("seller_key", value)}
-          />
-          <Select
-            label="Bodega"
-            value={filters.warehouse_key}
-            options={options?.warehouses}
-            onChange={(value) => update("warehouse_key", value)}
-          />
+          {!isReplenishment && (
+            <>
+              <Select
+                label="Vendedor"
+                value={filters.seller_key}
+                options={options?.sellers}
+                onChange={(value) => update("seller_key", value)}
+              />
+              <Select
+                label="Bodega"
+                value={filters.warehouse_key}
+                options={options?.warehouses}
+                onChange={(value) => update("warehouse_key", value)}
+              />
+            </>
+          )}
           <Select
             label="Familia"
             value={filters.family}
@@ -569,28 +602,22 @@ function FiltersBar({
             options={options?.suppliers}
             onChange={(value) => update("provider_key", value)}
           />
-          <Select
-            label="Estado"
-            value={filters.document_status}
-            options={options?.document_statuses}
-            onChange={(value) => update("document_status", value)}
-          />
+          {!isReplenishment && (
+            <Select
+              label="Estado"
+              value={filters.document_status}
+              options={options?.document_statuses}
+              onChange={(value) => update("document_status", value)}
+            />
+          )}
         </>
-      )}
-      {tab === "purchase-recommendations" && (
-        <p className="muted filter-scope">
-          Reponer usa Hasta como corte y hasta 365 días de demanda. Desde,
-          vendedor, bodega y estado no limitan el modelo.
-          Producto/familia/proveedor limitan la vista, no la asignación global
-          del presupuesto.
-        </p>
       )}
       {tab === "inventory" && (
         <p className="muted filter-scope">
           El rango filtra movimientos; existencias = última captura.
         </p>
       )}
-      {!["treasury", "repairs"].includes(tab) && (
+      {!isReplenishment && !["treasury", "repairs"].includes(tab) && (
         <details className="filter-scope">
           <summary>Cómo interpretar las cifras</summary>
           <p>
@@ -612,11 +639,13 @@ function Select({
   value,
   options,
   onChange,
+  emptyLabel = "Todos",
 }: {
   label: string;
   value?: string;
   options?: Option[];
   onChange: (value: string) => void;
+  emptyLabel?: string;
 }) {
   return (
     <label>
@@ -625,7 +654,7 @@ function Select({
         value={value || ""}
         onChange={(event) => onChange(event.target.value)}
       >
-        <option value="">Todos</option>
+        <option value="">{emptyLabel}</option>
         {options?.map((option) => (
           <option key={String(option.value)} value={option.value}>
             {option.label || option.value}

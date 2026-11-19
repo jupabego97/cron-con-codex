@@ -123,51 +123,53 @@ def prepare_snapshot_runs(session: Session, params: dict) -> None:
     session.execute(text(
         "CREATE UNIQUE INDEX ON mart_pending_snapshot_runs(snapshot_run_id)"
     ))
+    session.execute(text("ANALYZE mart_pending_snapshot_runs"))
 
 
 def project_snapshots(session: Session, statement: TextClause, params: dict) -> int:
-    pending = session.execute(
-        text("SELECT EXISTS(SELECT 1 FROM mart_pending_snapshot_runs)")
-    ).scalar()
-    if not pending:
+    pending_ids = list(session.scalars(text(
+        "SELECT snapshot_run_id FROM mart_pending_snapshot_runs"
+    )))
+    if not pending_ids:
         return 0
+    params = {**params, "pending_snapshot_ids": pending_ids}
     projection = FactProjection.from_insert(statement)
     stage = projection.stage(
         session, params,
         extra_filter=(
-            "AND snapshot.snapshot_run_id IN "
-            "(SELECT snapshot_run_id FROM mart_pending_snapshot_runs)"
+            "AND snapshot.snapshot_run_id = ANY(CAST(:pending_snapshot_ids AS uuid[]))"
         ),
     )
     columns = ",".join(projection.columns)
-    session.execute(text("DROP TABLE IF EXISTS pg_temp.mart_changed_snapshot_runs"))
     # EXCEPT ALL compares the complete multiset, including NULL dimensional keys.
     # A bootstrap can adopt existing matching runs WITHOUT deleting their history.
-    session.execute(text(f"""
-      CREATE TEMP TABLE mart_changed_snapshot_runs ON COMMIT DROP AS
+    changed_ids = list(session.scalars(text(f"""
       SELECT DISTINCT snapshot_run_id FROM (
         (SELECT {columns} FROM {stage}
          EXCEPT ALL
          SELECT {columns} FROM fact_inventory_snapshot
-         WHERE tenant_id=:tenant_id AND snapshot_run_id IN
-           (SELECT snapshot_run_id FROM mart_pending_snapshot_runs))
+         WHERE tenant_id=:tenant_id
+           AND snapshot_run_id = ANY(CAST(:pending_snapshot_ids AS uuid[])))
         UNION ALL
         (SELECT {columns} FROM fact_inventory_snapshot
-         WHERE tenant_id=:tenant_id AND snapshot_run_id IN
-           (SELECT snapshot_run_id FROM mart_pending_snapshot_runs)
+         WHERE tenant_id=:tenant_id
+           AND snapshot_run_id = ANY(CAST(:pending_snapshot_ids AS uuid[]))
          EXCEPT ALL
          SELECT {columns} FROM {stage})
       ) differences
-    """), params)
-    deleted = session.execute(text("""
-      DELETE FROM fact_inventory_snapshot WHERE tenant_id=:tenant_id
-        AND snapshot_run_id IN (SELECT snapshot_run_id FROM mart_changed_snapshot_runs)
-    """), params).rowcount
-    written = session.execute(text(f"""
-      INSERT INTO fact_inventory_snapshot ({columns})
-      SELECT {columns} FROM {stage} WHERE snapshot_run_id IN
-        (SELECT snapshot_run_id FROM mart_changed_snapshot_runs)
-    """), params).rowcount
+    """), params))
+    deleted = written = 0
+    if changed_ids:
+        params["changed_snapshot_ids"] = changed_ids
+        deleted = session.execute(text("""
+          DELETE FROM fact_inventory_snapshot WHERE tenant_id=:tenant_id
+            AND snapshot_run_id = ANY(CAST(:changed_snapshot_ids AS uuid[]))
+        """), params).rowcount
+        written = session.execute(text(f"""
+          INSERT INTO fact_inventory_snapshot ({columns})
+          SELECT {columns} FROM {stage}
+          WHERE snapshot_run_id = ANY(CAST(:changed_snapshot_ids AS uuid[]))
+        """), params).rowcount
     session.execute(text(f"""
       INSERT INTO mart_inventory_snapshot_runs
         (tenant_id,snapshot_run_id,records_projected,has_unresolved_dimensions)

@@ -10,8 +10,10 @@ test("acceso inválido, API caída, recuperación y catálogo vacío", async ({
   await page.getByLabel("Contraseña").fill("browser-test-password");
   await page.getByRole("button", { name: "Ingresar", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "Hoy: qué necesita atención" }),
+    page.getByRole("heading", { name: "Reponer", exact: true }),
   ).toBeVisible();
+  await expect(page.getByLabel("Fecha de corte")).toBeVisible();
+  await expect(page.getByLabel("Vendedor", { exact: true })).toHaveCount(0);
   await page.route("**/api/v1/operations/products?*", (route) =>
     route.fulfill({
       status: 503,
@@ -42,7 +44,7 @@ test("login → consultas reales → captura auditada de los módulos", async ({
     if (response.url().includes("/api/v1/") && response.status() >= 500)
       errors.push(`${response.status()} ${response.url()}`);
   });
-  await page.goto("/");
+  await page.goto("/?tab=today");
   await page.getByLabel("Contraseña").fill("browser-test-password");
   await page.getByRole("button", { name: "Ingresar", exact: true }).click();
   await expect(

@@ -44,7 +44,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function query(
-  filters: Filters,
+  filters: Partial<Filters>,
   extras: Record<string, string | number | undefined> = {},
 ): string {
   const params = new URLSearchParams();
