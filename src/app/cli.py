@@ -3,6 +3,7 @@ import asyncio
 import uuid
 from contextlib import suppress
 from datetime import date
+from decimal import Decimal
 from urllib.parse import urlencode
 
 import httpx
@@ -143,6 +144,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     webhooks.add_argument("tenant_slug")
     webhooks.add_argument("base_url")
+    nightly = subparsers.add_parser(
+        "publish-daily-replenishment", help="Publish the private daily procurement report"
+    )
+    nightly.add_argument("tenant_id", type=uuid.UUID)
+    nightly.add_argument("--weekly-budget", type=Decimal, default=Decimal("15000000"))
+    nightly.add_argument("--lookback-days", type=int, default=30)
+    nightly.add_argument("--force", action="store_true", help="Republish today's report")
     return parser
 
 
@@ -530,6 +538,13 @@ def main() -> None:
                 base_url=args.base_url,
             )
         )
+    elif args.command == "publish-daily-replenishment":
+        from app.services.nightly_replenishment import publish_daily
+
+        asyncio.run(publish_daily(
+            tenant_id=args.tenant_id, weekly_budget=args.weekly_budget,
+            lookback_days=args.lookback_days, force=args.force,
+        ))
     elif args.command == "import-opening-inventory":
         import_opening_inventory(
             tenant_id=args.tenant_id,

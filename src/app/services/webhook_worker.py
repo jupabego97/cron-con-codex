@@ -25,9 +25,12 @@ class WebhookBatchResult:
 class WebhookWorker:
     """Processes one durably claimed event at a time outside the webhook request path."""
 
-    def __init__(self, *, session: Session, alegra: AlegraClient) -> None:
+    def __init__(
+        self, *, session: Session, alegra: AlegraClient, tenant_id: uuid.UUID | None = None
+    ) -> None:
         self._session = session
         self._alegra = alegra
+        self._tenant_id = tenant_id
 
     async def run_batch(self, *, max_events: int = 500,
                         max_seconds: float = 240) -> WebhookBatchResult:
@@ -45,7 +48,7 @@ class WebhookWorker:
         return WebhookBatchResult(attempted, "event_limit")
 
     async def run_once(self) -> bool:
-        event = claim_next_event(self._session)
+        event = claim_next_event(self._session, tenant_id=self._tenant_id)
         if event is None:
             # The polling SELECT opens a transaction even when the queue is empty.
             # Release its relation lock before sleeping or migrations are blocked.

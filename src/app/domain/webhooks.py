@@ -31,6 +31,7 @@ _EVENT_TARGETS: dict[str, tuple[str, str]] = {
     "edit-item": ("item", "item"),
     "delete-item": ("item", "item"),
 }
+ALEGRA_WEBHOOK_SUBJECTS = frozenset(_EVENT_TARGETS)
 
 
 def parse_alegra_webhook(payload: dict[str, Any]) -> ParsedWebhookEvent:

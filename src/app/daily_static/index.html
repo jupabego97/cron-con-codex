@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Reponer diario</title>
+    <link rel="stylesheet" href="/assets/report.css">
+    <script src="/assets/report.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Reponer diario</h1>
+        <p id="cutoff" role="status">Cargando el último informe…</p>
+        <p id="warning" class="warning" role="status" hidden></p>
+      </header>
+      <section id="report" aria-label="Sugerencias de compra" hidden>
+        <dl class="totals">
+          <div><dt>Compra sugerida</dt><dd id="total"></dd></div>
+          <div><dt>Presupuesto semanal</dt><dd id="budget"></dd></div>
+          <div><dt>Proveedores</dt><dd id="suppliers"></dd></div>
+        </dl>
+        <div class="toolbar">
+          <label for="search">Buscar proveedor, producto o referencia</label>
+          <div class="controls">
+            <input id="search" type="search" autocomplete="off">
+            <label class="checkbox"><input id="critical" type="checkbox"> Solo críticos</label>
+            <button id="download" type="button">Descargar CSV</button>
+          </div>
+        </div>
+        <p id="matches" role="status"></p>
+        <div id="orders"></div>
+        <p class="note">Informe de consulta. Verifica stock y precio antes de comprar.</p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     dashboard_password: SecretStr | None = None
     dashboard_tenant_id: UUID | None = None
     dashboard_monthly_sales_target_cop: Decimal | None = None
+    daily_report_url: str | None = None
+    daily_report_publish_token: SecretStr | None = None
     analytics_default_currency_code: str = "COP"
 
     @model_validator(mode="after")

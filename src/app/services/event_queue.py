@@ -49,10 +49,12 @@ def enqueue_event(
     return queued, True
 
 
-def claim_next_event(session: Session) -> InboundEvent | None:
+def claim_next_event(
+    session: Session, *, tenant_id: uuid.UUID | None = None
+) -> InboundEvent | None:
     """Claim one available event using PostgreSQL row locking for safe multi-worker processing."""
     now = datetime.now(UTC)
-    event = session.scalar(
+    query = (
         select(InboundEvent)
         .where(
             or_(
@@ -66,6 +68,9 @@ def claim_next_event(session: Session) -> InboundEvent | None:
         .with_for_update(skip_locked=True)
         .limit(1)
     )
+    if tenant_id is not None:
+        query = query.where(InboundEvent.tenant_id == tenant_id)
+    event = session.scalar(query)
     if event is None:
         return None
     event.status = "processing"
